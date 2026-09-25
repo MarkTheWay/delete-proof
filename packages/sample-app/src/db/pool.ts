@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { databaseUrl } from '../config.js';
 
 const { Pool } = pg;
 
@@ -7,8 +8,8 @@ let _pool: pg.Pool | null = null;
 export function getPool(): pg.Pool {
   if (!_pool) {
     _pool = new Pool({
-      connectionString: process.env.DATABASE_URL ?? 'postgresql://deleteproof:deleteproof@localhost:5432/deleteproof',
-      max: 10,
+      connectionString: databaseUrl(),
+      max: 20,
     });
   }
   return _pool;

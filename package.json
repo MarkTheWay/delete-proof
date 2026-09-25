@@ -2,19 +2,28 @@
   "name": "delete-proof",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "dev": "npm run dev --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "cli": "npm run cli -w packages/runner",
-    "scenario": "npm run scenario -w packages/runner"
+    "dp": "npm run dp -w @delete-proof/runner --",
+    "migrate": "npm run migrate -w @delete-proof/sample-app",
+    "start:api": "npm run start:api -w @delete-proof/sample-app",
+    "start:worker": "npm run start:worker -w @delete-proof/sample-app",
+    "start:runner": "npm run start:server -w @delete-proof/runner",
+    "start:dashboard": "npm run dev -w @delete-proof/dashboard",
+    "services:up": "tsx scripts/services-up.ts",
+    "services:down": "tsx scripts/services-down.ts",
+    "test": "npm run test -w @delete-proof/runner",
+    "e2e": "npm run e2e -w @delete-proof/runner",
+    "build": "npm run build --workspaces --if-present"
   },
   "devDependencies": {
-    "rollup": "4.18.0",
-    "typescript": "5.4.5"
+    "embedded-postgres": "^17.10.0-beta.17",
+    "redis-memory-server": "^0.17.1",
+    "tsx": "^4.19.2",
+    "typescript": "5.7.3"
   },
   "engines": {
     "node": ">=20"

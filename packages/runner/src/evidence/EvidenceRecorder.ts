@@ -1,9 +1,17 @@
 /**
- * Evidence recorder — builds a RunResult as the scenario executes.
+ * Evidence recorder — separates executionStatus from safetyOutcome.
  */
-import { execSync } from 'child_process';
-import type { ExecutionStatus, InvariantStatus, Mode, RunResult, ScenarioId, TraceEvent } from '@delete-proof/shared';
-import { v4 as uuidv4 } from 'uuid';
+import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import type {
+  ExecutionStatus,
+  Mode,
+  RunResult,
+  SafetyOutcome,
+  ScenarioId,
+  TraceEvent,
+  Customer,
+} from '@delete-proof/shared';
 
 export class EvidenceRecorder {
   readonly runId: string;
@@ -15,12 +23,16 @@ export class EvidenceRecorder {
     readonly scenario: ScenarioId,
     readonly mode: Mode,
   ) {
-    this.runId = uuidv4();
+    this.runId = randomUUID();
     this.startedAt = new Date().toISOString();
   }
 
   addTrace(event: TraceEvent): void {
     this.trace.push(event);
+  }
+
+  setTrace(events: TraceEvent[]): void {
+    this.trace = events;
   }
 
   addError(msg: string): void {
@@ -29,9 +41,10 @@ export class EvidenceRecorder {
 
   build(
     executionStatus: ExecutionStatus,
-    invariantStatus: InvariantStatus,
+    safetyOutcome: SafetyOutcome,
     verdict: string,
-    finalCustomerState: RunResult['finalCustomerState'],
+    finalCustomerState: Customer | null,
+    tombstonePresent?: boolean,
   ): RunResult {
     const completedAt = new Date().toISOString();
     const durationMs =
@@ -40,11 +53,17 @@ export class EvidenceRecorder {
     let codeRevision: string | undefined;
     let dirtyWorktree: boolean | undefined;
     try {
-      codeRevision = execSync('git rev-parse --short HEAD', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-      const status = execSync('git status --porcelain', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+      codeRevision = execSync('git rev-parse --short HEAD', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).trim();
+      const status = execSync('git status --porcelain', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).trim();
       dirtyWorktree = status.length > 0;
     } catch {
-      // git not available or no commits yet
+      /* git unavailable */
     }
 
     return {
@@ -55,10 +74,11 @@ export class EvidenceRecorder {
       completedAt,
       durationMs,
       executionStatus,
-      invariantStatus,
+      safetyOutcome,
       verdict,
       trace: this.trace,
       finalCustomerState,
+      tombstonePresent,
       errors: this.errors,
       codeRevision,
       dirtyWorktree,

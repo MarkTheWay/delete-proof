@@ -1,9 +1,10 @@
-import type { Mode, RunResult, ScenarioId, TargetAdapter } from '@delete-proof/shared';
-import { runDelayedUpdateAfterDeletion } from './scenarioA';
-import { runDuplicateStaleDelivery } from './scenarioB';
-import { runConcurrentDeletionAndUpdate } from './scenarioC';
-import { runNormalActiveUpdate } from './scenarioD';
-import { runUnrelatedCustomerUpdate } from './scenarioE';
+import type { Mode, RunResult, ScenarioId } from '@delete-proof/shared';
+import type { SampleAppAdapter } from '../adapters/SampleAppAdapter.js';
+import { runDelayedUpdateAfterDelete } from './delayed-update-after-delete.js';
+import { runDuplicateStaleDelivery } from './duplicate-stale-delivery.js';
+import { runConcurrentDeleteUpdate } from './concurrent-delete-update.js';
+import { runActiveCustomerUpdate } from './active-customer-update.js';
+import { runUnrelatedCustomerUpdate } from './unrelated-customer-update.js';
 
 export interface ScenarioMeta {
   id: ScenarioId;
@@ -14,33 +15,34 @@ export interface ScenarioMeta {
 
 export const SCENARIOS: ScenarioMeta[] = [
   {
-    id: 'delayed_update_after_deletion',
-    title: 'A: Delayed update after deletion',
-    description: 'Stale event queued before deletion; worker held at barrier, then released after delete commits.',
+    id: 'delayed-update-after-delete',
+    title: 'Delayed update after delete',
+    description:
+      'Stale sync queued before deletion; Redis barriers make the interleaving deterministic.',
     supportedModes: ['vulnerable', 'fixed'],
   },
   {
-    id: 'duplicate_stale_delivery',
-    title: 'B: Duplicate stale delivery',
-    description: 'Same pre-deletion event delivered twice. Fixed mode must block both deliveries.',
-    supportedModes: ['fixed', 'vulnerable'],
-  },
-  {
-    id: 'concurrent_deletion_and_update',
-    title: 'C: Concurrent deletion and processing',
-    description: 'Deletion-first interleaving. Fixed mode ensures the worker sees the tombstone.',
+    id: 'duplicate-stale-delivery',
+    title: 'Duplicate stale delivery',
+    description: 'Same pre-deletion sync delivered twice. Fixed mode must block both.',
     supportedModes: ['vulnerable', 'fixed'],
   },
   {
-    id: 'normal_active_update',
-    title: 'D: Normal active-customer update',
-    description: 'Customer is not deleted. Update event must succeed.',
+    id: 'concurrent-delete-update',
+    title: 'Concurrent delete + update',
+    description: 'Exercises both advisory-lock orderings (delete-first and worker-first).',
     supportedModes: ['vulnerable', 'fixed'],
   },
   {
-    id: 'unrelated_customer_update',
-    title: 'E: Unrelated customer update',
-    description: 'Customer A deleted; Customer B update must not be affected.',
+    id: 'active-customer-update',
+    title: 'Active customer update',
+    description: 'Customer is not deleted. Sync must succeed.',
+    supportedModes: ['vulnerable', 'fixed'],
+  },
+  {
+    id: 'unrelated-customer-update',
+    title: 'Unrelated customer update',
+    description: 'Customer A deleted; Customer B sync must not be affected.',
     supportedModes: ['vulnerable', 'fixed'],
   },
 ];
@@ -48,23 +50,20 @@ export const SCENARIOS: ScenarioMeta[] = [
 export async function runScenario(
   id: ScenarioId,
   mode: Mode,
-  adapter: TargetAdapter,
+  adapter: SampleAppAdapter,
 ): Promise<RunResult> {
   switch (id) {
-    case 'delayed_update_after_deletion':
-      return runDelayedUpdateAfterDeletion(adapter, mode);
-    case 'duplicate_stale_delivery':
+    case 'delayed-update-after-delete':
+      return runDelayedUpdateAfterDelete(adapter, mode);
+    case 'duplicate-stale-delivery':
       return runDuplicateStaleDelivery(adapter, mode);
-    case 'concurrent_deletion_and_update':
-      return runConcurrentDeletionAndUpdate(adapter, mode);
-    case 'normal_active_update':
-      return runNormalActiveUpdate(adapter, mode);
-    case 'unrelated_customer_update':
+    case 'concurrent-delete-update':
+      return runConcurrentDeleteUpdate(adapter, mode);
+    case 'active-customer-update':
+      return runActiveCustomerUpdate(adapter, mode);
+    case 'unrelated-customer-update':
       return runUnrelatedCustomerUpdate(adapter, mode);
     default:
       throw new Error(`Unknown scenario: ${id}`);
   }
 }
-
-
-

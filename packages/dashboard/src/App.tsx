@@ -17,13 +17,23 @@ interface RunResult {
   completedAt?: string;
   durationMs?: number;
   executionStatus: 'running' | 'completed' | 'failed';
-  invariantStatus: 'held' | 'violated' | 'not_applicable' | 'pending';
+  /** DoD field — preferred over legacy invariantStatus */
+  safetyOutcome?: 'invariant_held' | 'invariant_violated' | 'not_evaluated';
+  /** Legacy field kept for older evidence files */
+  invariantStatus?: 'held' | 'violated' | 'not_applicable' | 'pending';
   verdict: string;
   trace: TraceEvent[];
   finalCustomerState: unknown | null;
   errors: string[];
   codeRevision?: string;
   dirtyWorktree?: boolean;
+}
+
+function safetyLabel(run: RunResult): string {
+  if (run.safetyOutcome === 'invariant_held') return 'held';
+  if (run.safetyOutcome === 'invariant_violated') return 'violated';
+  if (run.safetyOutcome === 'not_evaluated') return 'not_evaluated';
+  return run.invariantStatus ?? 'not_evaluated';
 }
 
 interface ScenarioMeta {
@@ -192,7 +202,7 @@ function RunCard({ run, onSelect, selected }: { run: RunResult; onSelect: () => 
         <span style={{ fontSize: 11, color: 'var(--muted)' }}>{run.durationMs}ms</span>
       </div>
       <div style={{ fontSize: 12, marginTop: 4, color: 'var(--muted)' }}>{run.scenario}</div>
-      <div style={{ fontSize: 12, marginTop: 4 }}><InvariantBadge status={run.invariantStatus} /></div>
+      <div style={{ fontSize: 12, marginTop: 4 }}><InvariantBadge status={safetyLabel(run)} /></div>
       <div style={{ fontSize: 11, marginTop: 4, color: 'var(--muted)', fontStyle: 'italic' }}>{run.verdict}</div>
     </div>
   );
@@ -215,7 +225,7 @@ function ComparisonPanel({ runs }: { runs: RunResult[] }) {
             <div style={{ fontWeight: 700, marginBottom: 8, fontSize: 13 }}>{label}</div>
             {run ? (
               <>
-                <InvariantBadge status={run.invariantStatus} />
+                <InvariantBadge status={safetyLabel(run)} />
                 <p style={{ fontSize: 12, marginTop: 8, color: 'var(--muted)', fontStyle: 'italic' }}>{run.verdict}</p>
                 <div style={{ marginTop: 12 }}>
                   <CustomerState state={run.finalCustomerState} label="Final customer state" />
@@ -236,7 +246,7 @@ export default function App() {
   const { ready, error: readyError } = useReadiness();
   const { runs, loading: runsLoading, refetch: refetchRuns } = useRuns();
   const [scenarios, setScenarios] = useState<ScenarioMeta[]>([]);
-  const [selectedScenario, setSelectedScenario] = useState('delayed_update_after_deletion');
+      const [selectedScenario, setSelectedScenario] = useState('delayed-update-after-delete');
   const [selectedMode, setSelectedMode] = useState<'vulnerable' | 'fixed'>('vulnerable');
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -412,7 +422,7 @@ export default function App() {
                     Run {selectedRun.runId} · {selectedRun.startedAt.slice(0, 19).replace('T', ' ')}
                     {selectedRun.codeRevision && ` · rev ${selectedRun.codeRevision}${selectedRun.dirtyWorktree ? '*' : ''}`}
                   </div>
-                  <div style={{ marginTop: 8 }}><InvariantBadge status={selectedRun.invariantStatus} /></div>
+                  <div style={{ marginTop: 8 }}><InvariantBadge status={safetyLabel(selectedRun)} /></div>
                   <div style={{ fontSize: 12, marginTop: 4, color: 'var(--muted)', fontStyle: 'italic' }}>{selectedRun.verdict}</div>
                 </div>
                 <a

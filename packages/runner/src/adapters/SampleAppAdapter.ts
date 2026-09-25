@@ -1,264 +1,332 @@
 /**
- * SampleAppAdapter — implements TargetAdapter against the local sample-app
- * PostgreSQL and Redis services directly (no HTTP hop needed for CLI / Vitest).
+ * SampleAppAdapter — talks HTTP + Redis barriers/traces + read-only Postgres.
+ * NEVER imports sample-app internals.
  */
-import { Queue } from 'bullmq';
 import pg from 'pg';
-import { v4 as uuidv4 } from 'uuid';
-import type { Customer, Mode, TargetAdapter, TraceEvent, TraceEventKind } from '@delete-proof/shared';
+import type {
+  Customer,
+  LockWaitState,
+  Mode,
+  TargetAdapter,
+  Tombstone,
+  TraceEvent,
+  TraceEventKind,
+} from '@delete-proof/shared';
+import {
+  armJobReceivedBarrier as redisArmJobReceived,
+  cleanupRedisRun,
+  getRedis,
+  releaseBarrier as redisReleaseBarrier,
+  traceKey,
+  waitForBarrierAck as redisWaitForBarrierAck,
+  waitForFirstBarrierAck as redisWaitForFirstBarrierAck,
+} from '../barriers.js';
+import { barrierTimeoutMs, databaseUrl, sampleAppBaseUrl } from '../env.js';
 
 const { Pool } = pg;
 
-function getPool(): pg.Pool {
-  return new Pool({
-    connectionString: process.env.DATABASE_URL ?? 'postgresql://deleteproof:deleteproof@localhost:5432/deleteproof',
-    max: 5,
-  });
-}
-
-function getRedis() {
-  const url = new URL(process.env.REDIS_URL ?? 'redis://localhost:6379');
-  return { host: url.hostname, port: Number(url.port || 6379) };
-}
-
-/** Same hash as worker and API */
-function lockKey(customerId: string): bigint {
-  let h = 5381n;
-  for (const ch of customerId) {
-    h = ((h << 5n) + h + BigInt(ch.charCodeAt(0))) & 0x7fffffffffffffffn;
-  }
-  return h;
-}
-
-const seqCounters = new Map<string, number>();
-
-function nextSeq(runId: string): number {
-  const n = (seqCounters.get(runId) ?? 0) + 1;
-  seqCounters.set(runId, n);
-  return n;
-}
-
-async function emitTrace(
-  pool: pg.Pool,
-  runId: string,
-  kind: TraceEventKind,
-  message: string,
-  data?: Record<string, unknown>,
-): Promise<void> {
-  const seq = nextSeq(runId);
-  await pool.query(
-    `INSERT INTO trace_events (run_id, seq, kind, message, data)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [runId, seq, kind, message, data ? JSON.stringify(data) : null],
-  );
-}
-
 export class SampleAppAdapter implements TargetAdapter {
-  private pools = new Map<string, pg.Pool>();
+  private readonly baseUrl: string;
+  private readonly pool: pg.Pool;
 
-  private pool(runId: string): pg.Pool {
-    if (!this.pools.has(runId)) this.pools.set(runId, getPool());
-    return this.pools.get(runId)!;
+  constructor(baseUrl = sampleAppBaseUrl()) {
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.pool = new Pool({ connectionString: databaseUrl(), max: 5 });
   }
 
-  async setup(runId: string): Promise<void> {
-    const pool = this.pool(runId);
-    // Ensure schema exists
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS customers (
-        id UUID PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL,
-        profile JSONB NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE TABLE IF NOT EXISTS tombstones (
-        customer_id UUID PRIMARY KEY, deleted_at TIMESTAMPTZ NOT NULL DEFAULT now(), run_id TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS barriers (
-        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, released BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE TABLE IF NOT EXISTS job_completions (
-        job_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, customer_id UUID NOT NULL,
-        outcome TEXT NOT NULL, completed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE TABLE IF NOT EXISTS trace_events (
-        id BIGSERIAL PRIMARY KEY, run_id TEXT NOT NULL, seq INTEGER NOT NULL,
-        ts TIMESTAMPTZ NOT NULL DEFAULT now(), kind TEXT NOT NULL,
-        message TEXT NOT NULL, data JSONB
-      );
-      CREATE INDEX IF NOT EXISTS trace_events_run_id ON trace_events (run_id, seq);
-    `);
-    seqCounters.set(runId, 0);
+  private async http<T>(
+    path: string,
+    init?: RequestInit & { expectJson?: boolean },
+  ): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: {
+        'content-type': 'application/json',
+        ...(init?.headers ?? {}),
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`sample-app ${init?.method ?? 'GET'} ${path} → ${res.status}: ${body}`);
+    }
+    if (res.status === 204 || init?.expectJson === false) {
+      return undefined as T;
+    }
+    return (await res.json()) as T;
   }
 
-  async teardown(runId: string): Promise<void> {
-    const pool = this.pool(runId);
-    await pool.query(`DELETE FROM trace_events WHERE run_id = $1`, [runId]);
-    await pool.query(`DELETE FROM job_completions WHERE run_id = $1`, [runId]);
-    await pool.query(`DELETE FROM barriers WHERE run_id = $1`, [runId]);
-    await pool.query(`DELETE FROM tombstones WHERE run_id = $1`, [runId]);
-    seqCounters.delete(runId);
-    await pool.end();
-    this.pools.delete(runId);
-  }
-
-  async createCustomer(runId: string, opts: { email: string; name: string }): Promise<string> {
-    const pool = this.pool(runId);
-    const id = uuidv4();
-    await pool.query(
-      `INSERT INTO customers (id, email, name, profile, created_at, updated_at)
-       VALUES ($1, $2, $3, '{}', now(), now())`,
-      [id, opts.email, opts.name],
-    );
-    await emitTrace(pool, runId, 'customer_created', `Customer ${id} created`, { id, ...opts });
-    return id;
-  }
-
-  async queueUpdateEvent(
+  async createCustomer(
     runId: string,
-    customerId: string,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
-    const pool = this.pool(runId);
-    const queue = new Queue('profile-updates', { connection: getRedis() });
-    const jobId = uuidv4();
-    await queue.add('profile-update', {
-      runId,
-      customerId,
-      mode: payload.mode ?? 'vulnerable',
-      profilePatch: payload.profilePatch ?? {},
-      jobId,
-      email: payload.email ?? 'synthetic@example.com',
-      name: payload.name ?? 'Synthetic User',
-    }, { jobId });
-    await queue.close();
-    await emitTrace(pool, runId, 'event_queued', `Update event queued for customer ${customerId}`, {
-      customerId, jobId, runId,
+    opts: { email: string; name: string },
+  ): Promise<Customer> {
+    return this.http<Customer>('/customers', {
+      method: 'POST',
+      body: JSON.stringify({ runId, email: opts.email, name: opts.name }),
     });
   }
 
-  async raiseBarrier(runId: string, name: string): Promise<void> {
-    const pool = this.pool(runId);
-    await pool.query(
-      `INSERT INTO barriers (id, run_id, released) VALUES ($1, $2, false)
-       ON CONFLICT (id) DO UPDATE SET released = false`,
-      [`${runId}:${name}`, runId],
-    );
-    await emitTrace(pool, runId, 'barrier_raised', `Barrier raised: ${name}`, { name });
+  async enqueueSync(
+    runId: string,
+    customerId: string,
+    opts: {
+      mode: Mode;
+      profilePatch?: Record<string, unknown>;
+      email?: string;
+      name?: string;
+      jobId?: string;
+    },
+  ): Promise<{ jobId: string }> {
+    return this.http<{ jobId: string }>(`/customers/${customerId}/enqueue`, {
+      method: 'POST',
+      body: JSON.stringify({
+        runId,
+        mode: opts.mode,
+        profilePatch: opts.profilePatch ?? {},
+        email: opts.email,
+        name: opts.name,
+        jobId: opts.jobId,
+      }),
+    });
   }
 
-  async deleteCustomer(runId: string, customerId: string, mode: Mode): Promise<void> {
-    const pool = this.pool(runId);
-    if (mode === 'fixed') {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query(`SELECT pg_advisory_xact_lock($1)`, [lockKey(customerId).toString()]);
-        await client.query(
-          `INSERT INTO tombstones (customer_id, deleted_at, run_id) VALUES ($1, now(), $2)
-           ON CONFLICT (customer_id) DO NOTHING`,
-          [customerId, runId],
-        );
-        await client.query(`DELETE FROM customers WHERE id = $1`, [customerId]);
-        await client.query('COMMIT');
-        await emitTrace(pool, runId, 'deletion_committed', `[FIXED] Customer ${customerId} deleted with tombstone`, {
-          customerId, mode,
-        });
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
-    } else {
-      await pool.query(`DELETE FROM customers WHERE id = $1`, [customerId]);
-      await emitTrace(pool, runId, 'deletion_committed', `[VULNERABLE] Customer ${customerId} deleted (no tombstone)`, {
-        customerId, mode,
+  /**
+   * Delete customer via HTTP.
+   * Fixed mode blocks at api.before_commit — this method waits for the ack
+   * and releases it unless `holdBeforeCommit` is true.
+   */
+  async deleteCustomer(
+    runId: string,
+    customerId: string,
+    mode: Mode,
+    opts?: { holdBeforeCommit?: boolean },
+  ): Promise<void> {
+    if (mode === 'fixed' && !opts?.holdBeforeCommit) {
+      const pending = this.http<void>(`/customers/${customerId}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ runId, mode }),
+        expectJson: false,
       });
+      await redisWaitForBarrierAck(runId, 'api.before_commit');
+      await redisReleaseBarrier(runId, 'api.before_commit');
+      await pending;
+      return;
     }
+
+    if (mode === 'fixed' && opts?.holdBeforeCommit) {
+      throw new Error('Use startDeleteCustomer() when holdBeforeCommit is required');
+    }
+
+    await this.http<void>(`/customers/${customerId}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ runId, mode }),
+      expectJson: false,
+    });
   }
 
-  async assertDeleted(runId: string, customerId: string): Promise<boolean> {
-    const pool = this.pool(runId);
-    const result = await pool.query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM customers WHERE id = $1`,
+  /**
+   * Start a fixed-mode delete without releasing api.before_commit.
+   * Caller must waitForBarrierAck + releaseBarrier, then await the promise.
+   */
+  startDeleteCustomer(
+    runId: string,
+    customerId: string,
+    mode: Mode,
+  ): Promise<void> {
+    return this.http<void>(`/customers/${customerId}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ runId, mode }),
+      expectJson: false,
+    });
+  }
+
+  async readCustomer(customerId: string): Promise<Customer | null> {
+    const result = await this.pool.query(
+      `SELECT id, email, name, profile, run_id, created_at, updated_at
+       FROM customers WHERE id = $1`,
       [customerId],
     );
-    return parseInt(result.rows[0].count, 10) === 0;
-  }
-
-  async releaseBarrier(runId: string, name: string): Promise<void> {
-    const pool = this.pool(runId);
-    await pool.query(
-      `UPDATE barriers SET released = true WHERE id = $1`,
-      [`${runId}:${name}`],
-    );
-    await emitTrace(pool, runId, 'barrier_released', `Barrier released: ${name}`, { name });
-  }
-
-  async waitForWorker(runId: string, jobId: string, timeoutMs = 15_000): Promise<void> {
-    const pool = this.pool(runId);
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const result = await pool.query<{ outcome: string }>(
-        `SELECT outcome FROM job_completions WHERE job_id = $1 AND run_id = $2`,
-        [jobId, runId],
-      );
-      if (result.rows.length > 0) return;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    throw new Error(`Worker did not complete job ${jobId} within ${timeoutMs}ms`);
-  }
-
-  async queryCustomer(_runId: string, customerId: string): Promise<Customer | null> {
-    // Use a fresh pool for assertions (not run-specific to avoid closed pools)
-    const pool = getPool();
-    const result = await pool.query<{
-      id: string; email: string; name: string; profile: Record<string, unknown>;
-      created_at: Date; updated_at: Date;
-    }>(
-      `SELECT id, email, name, profile, created_at, updated_at FROM customers WHERE id = $1`,
-      [customerId],
-    );
-    await pool.end();
     if (result.rows.length === 0) return null;
     const r = result.rows[0];
     return {
-      id: r.id, email: r.email, name: r.name, profile: r.profile,
-      createdAt: r.created_at.toISOString(), updatedAt: r.updated_at.toISOString(),
+      id: r.id,
+      email: r.email,
+      name: r.name,
+      profile: r.profile,
+      runId: r.run_id ?? undefined,
+      createdAt: r.created_at.toISOString(),
+      updatedAt: r.updated_at.toISOString(),
     };
   }
 
-  onTrace(runId: string, cb: (event: TraceEvent) => void): () => void {
-    const pool = this.pool(runId);
-    let lastSeq = 0;
-    let active = true;
-
-    const poll = async () => {
-      while (active) {
-        const result = await pool.query<{
-          seq: number; ts: Date; kind: TraceEventKind; message: string; data: unknown;
-        }>(
-          `SELECT seq, ts, kind, message, data FROM trace_events
-           WHERE run_id = $1 AND seq > $2 ORDER BY seq ASC`,
-          [runId, lastSeq],
-        );
-        for (const r of result.rows) {
-          lastSeq = r.seq;
-          cb({
-            seq: r.seq,
-            ts: r.ts.toISOString(),
-            kind: r.kind,
-            message: r.message,
-            data: r.data as Record<string, unknown> | undefined,
-          });
-        }
-        await new Promise((r) => setTimeout(r, 200));
-      }
+  async readTombstone(customerId: string): Promise<Tombstone | null> {
+    const result = await this.pool.query(
+      `SELECT customer_id, deleted_at, run_id FROM customer_tombstones WHERE customer_id = $1`,
+      [customerId],
+    );
+    if (result.rows.length === 0) return null;
+    const r = result.rows[0];
+    return {
+      customerId: r.customer_id,
+      deletedAt: r.deleted_at.toISOString(),
+      runId: r.run_id,
     };
+  }
 
-    poll().catch(() => undefined);
-    return () => { active = false; };
+  async lockWaitState(runId: string): Promise<LockWaitState> {
+    const result = await this.pool.query<{
+      pid: number;
+      application_name: string | null;
+      wait_event_type: string | null;
+      wait_event: string | null;
+      state: string | null;
+      query: string | null;
+    }>(
+      `SELECT pid, application_name, wait_event_type, wait_event, state, query
+       FROM pg_stat_activity
+       WHERE application_name LIKE $1
+         AND wait_event_type = 'Lock'`,
+      [`dp:${runId}:%`],
+    );
+    const backends = result.rows.map((r) => ({
+      pid: r.pid,
+      applicationName: r.application_name,
+      waitEventType: r.wait_event_type,
+      waitEvent: r.wait_event,
+      state: r.state,
+      query: r.query,
+    }));
+    return { waiting: backends.length > 0, backends };
+  }
+
+  async health(): Promise<{
+    ok: boolean;
+    api: string;
+    postgres: string;
+    redis: string;
+  }> {
+    let api = 'error';
+    let postgres = 'error';
+    let redis = 'error';
+    try {
+      const res = await fetch(`${this.baseUrl}/health`);
+      api = res.ok ? 'ok' : 'error';
+    } catch {
+      api = 'error';
+    }
+    try {
+      await this.pool.query('SELECT 1');
+      postgres = 'ok';
+    } catch {
+      postgres = 'error';
+    }
+    try {
+      const pong = await getRedis().ping();
+      redis = pong === 'PONG' ? 'ok' : 'error';
+    } catch {
+      redis = 'error';
+    }
+    return { ok: api === 'ok' && postgres === 'ok' && redis === 'ok', api, postgres, redis };
+  }
+
+  async cleanup(runId: string): Promise<void> {
+    // Unblock barriers + drop Redis keys
+    await cleanupRedisRun(runId);
+
+    // Cancel backends tagged with this run
+    try {
+      await this.pool.query(
+        `SELECT pg_terminate_backend(pid)
+         FROM pg_stat_activity
+         WHERE application_name LIKE $1
+           AND pid <> pg_backend_pid()`,
+        [`dp:${runId}:%`],
+      );
+    } catch {
+      /* ignore */
+    }
+
+    await this.pool.query(`DELETE FROM customers WHERE run_id = $1`, [runId]);
+    await this.pool.query(`DELETE FROM customer_tombstones WHERE run_id = $1`, [runId]);
+  }
+
+  async waitForBarrierAck(runId: string, point: string, timeoutMs?: number): Promise<void> {
+    await redisWaitForBarrierAck(runId, point, timeoutMs);
+  }
+
+  async waitForFirstBarrierAck(
+    runId: string,
+    points: string[],
+    timeoutMs?: number,
+  ): Promise<string> {
+    return redisWaitForFirstBarrierAck(runId, points, timeoutMs);
+  }
+
+  async releaseBarrier(runId: string, point: string): Promise<void> {
+    await redisReleaseBarrier(runId, point);
+  }
+
+  /** Opt-in: workers will pause at worker.job_received for this run. */
+  async armJobReceivedBarrier(runId: string): Promise<void> {
+    await redisArmJobReceived(runId);
+  }
+
+  async readTrace(runId: string): Promise<TraceEvent[]> {
+    const rows = await getRedis().xrange(traceKey(runId), '-', '+');
+    return rows.map(([id, flat]) => {
+      const map: Record<string, string> = {};
+      for (let i = 0; i < flat.length; i += 2) map[flat[i]] = flat[i + 1];
+      let data: Record<string, unknown> | undefined;
+      if (map.data) {
+        try {
+          data = JSON.parse(map.data) as Record<string, unknown>;
+        } catch {
+          /* ignore */
+        }
+      }
+      return {
+        id,
+        ts: map.ts ?? new Date().toISOString(),
+        kind: (map.kind ?? 'error') as TraceEventKind,
+        actor: map.actor,
+        message: map.message ?? '',
+        data,
+      };
+    });
+  }
+
+  /**
+   * Poll Redis trace until a matching kind appears (or timeout).
+   */
+  async waitForTraceKind(
+    runId: string,
+    kinds: TraceEventKind[],
+    timeoutMs = barrierTimeoutMs(),
+  ): Promise<TraceEvent> {
+    const deadline = Date.now() + timeoutMs;
+    const wanted = new Set(kinds);
+    while (Date.now() < deadline) {
+      const events = await this.readTrace(runId);
+      const hit = [...events].reverse().find((e) => wanted.has(e.kind));
+      if (hit) return hit;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`Timed out waiting for trace kinds: ${kinds.join(', ')}`);
+  }
+
+  /**
+   * Poll lock waits until observed or timeout. Runner never holds locks itself.
+   */
+  async waitForLockWait(runId: string, timeoutMs = 10_000): Promise<LockWaitState> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const state = await this.lockWaitState(runId);
+      if (state.waiting) return state;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return this.lockWaitState(runId);
+  }
+
+  async close(): Promise<void> {
+    await this.pool.end();
   }
 }

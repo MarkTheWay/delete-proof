@@ -6,7 +6,9 @@
       "cwd": "${workspaceFolder}",
       "env": {
         "DATABASE_URL": "postgresql://deleteproof:deleteproof@localhost:5432/deleteproof",
-        "REDIS_URL": "redis://localhost:6379"
+        "REDIS_URL": "redis://localhost:6379",
+        "SAMPLE_APP_PORT": "3000",
+        "DELETEPROOF_TEST_HOOKS": "1"
       }
     }
   }

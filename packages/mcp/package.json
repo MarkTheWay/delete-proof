@@ -1,0 +1,17 @@
+{
+  "name": "@delete-proof/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@delete-proof/runner": "*",
+    "@delete-proof/shared": "*"
+  },
+  "devDependencies": {
+    "tsx": "4.19.2",
+    "typescript": "5.7.3"
+  }
+}

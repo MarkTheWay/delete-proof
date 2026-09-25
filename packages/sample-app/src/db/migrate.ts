@@ -1,70 +1,56 @@
 /**
- * Schema migrations for DeleteProof sample app.
+ * Schema for DeleteProof sample app.
  *
- * Tables:
- *   customers         – live customer records
- *   tombstones        – immutable deletion markers (the repair mechanism)
- *   customer_lock_key – advisory lock namespace (BigInt hash of customer ID)
- *   barriers          – cross-process synchronisation for scenario runners
- *   job_completions   – worker acknowledgement records for scenario coordination
+ * customers              – live customer records
+ * customer_tombstones    – durable deletion markers (repair)
+ * customer_lock_key(uuid) – wraps hashtextextended for advisory locks
  */
-import { getPool, closePool } from './pool';
+import { loadEnv } from '../config.js';
+import { getPool, closePool } from './pool.js';
+
+loadEnv();
 
 const DDL = /* sql */ `
--- customers: live records
 CREATE TABLE IF NOT EXISTS customers (
   id          UUID PRIMARY KEY,
   email       TEXT NOT NULL,
   name        TEXT NOT NULL,
-  profile     JSONB NOT NULL DEFAULT '{}',
+  profile     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  run_id      TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- tombstones: immutable deletion markers – the core repair mechanism
--- Once a row exists here the customer MUST NOT be recreated.
-CREATE TABLE IF NOT EXISTS tombstones (
+CREATE TABLE IF NOT EXISTS customer_tombstones (
   customer_id UUID PRIMARY KEY,
   deleted_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   run_id      TEXT NOT NULL
 );
 
--- barriers: cross-process synchronisation for test scenarios
--- A barrier row with released=false pauses the worker.
-CREATE TABLE IF NOT EXISTS barriers (
-  id         TEXT PRIMARY KEY,
-  run_id     TEXT NOT NULL,
-  released   BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+CREATE INDEX IF NOT EXISTS customers_run_id_idx ON customers (run_id);
+CREATE INDEX IF NOT EXISTS customer_tombstones_run_id_idx ON customer_tombstones (run_id);
 
--- job_completions: the worker writes here when it finishes a job
--- (regardless of whether it wrote the customer record)
-CREATE TABLE IF NOT EXISTS job_completions (
-  job_id         TEXT PRIMARY KEY,
-  run_id         TEXT NOT NULL,
-  customer_id    UUID NOT NULL,
-  outcome        TEXT NOT NULL,  -- 'written' | 'skipped_tombstone' | 'error'
-  completed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- trace_events: ordered log shared between API, worker, and scenarios
-CREATE TABLE IF NOT EXISTS trace_events (
-  id          BIGSERIAL PRIMARY KEY,
-  run_id      TEXT NOT NULL,
-  seq         INTEGER NOT NULL,
-  ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  kind        TEXT NOT NULL,
-  message     TEXT NOT NULL,
-  data        JSONB
-);
-CREATE INDEX IF NOT EXISTS trace_events_run_id ON trace_events (run_id, seq);
+CREATE OR REPLACE FUNCTION customer_lock_key(id uuid)
+RETURNS bigint
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+  SELECT hashtextextended(id::text, 0);
+$$;
 `;
 
 async function migrate(): Promise<void> {
   const pool = getPool();
   console.log('Running schema migrations…');
   await pool.query(DDL);
+  // Drop legacy demo tables if present from earlier drafts
+  await pool.query(`
+    DROP TABLE IF EXISTS barriers;
+    DROP TABLE IF EXISTS job_completions;
+    DROP TABLE IF EXISTS trace_events;
+    DROP TABLE IF EXISTS tombstones;
+  `);
   console.log('Migrations complete.');
   await closePool();
 }
@@ -73,6 +59,3 @@ migrate().catch((err) => {
   console.error('Migration failed:', err);
   process.exit(1);
 });
-
-
-

@@ -1,6 +1,6 @@
 # DeleteProof
 
-**IBM Bob Hackathon 2024**
+**IBM Bob Hackathon**
 
 Reproduce and repair a distributed-systems ghost-write bug: a deleted customer
 is recreated by a stale asynchronous event. DeleteProof proves the failure,
@@ -24,141 +24,162 @@ row — violating the invariant:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  CLI / Dashboard                                        │
-│  packages/runner  ──► SampleAppAdapter                  │
-└────────────────────────┬────────────────────────────────┘
-                         │
-        ┌────────────────┼──────────────────┐
-        ▼                ▼                  ▼
-  Fastify API       PostgreSQL          Redis / BullMQ
-  (customers,      (customers,          (profile-updates
-   barriers,        tombstones,          queue)
-   trace)           barriers,
-                    job_completions,
-                    trace_events)
+CLI / Dashboard / MCP
         │
         ▼
-  BullMQ Worker
-  (vulnerable | fixed processing)
+packages/runner  (HTTP + Redis barriers/traces + read-only Postgres)
+        │
+        ├── HTTP ──► packages/sample-app (Fastify API)
+        ├── Redis ──► barriers (LPUSH/BLPOP) + trace stream (XADD)
+        └── PG RO ──► assertions / pg_stat_activity lock waits
+                │
+                ▼
+        BullMQ worker (vulnerable | fixed)
+                │
+                ▼
+        PostgreSQL 17  (customers, customer_tombstones, customer_lock_key)
 ```
 
-**Packages:**
-- `packages/shared`     — TypeScript types and the `TargetAdapter` interface
-- `packages/sample-app` — Fastify API + BullMQ worker (vulnerable and fixed modes)
-- `packages/runner`     — Scenario runner, CLI, HTTP API, Vitest suite
-- `packages/dashboard`  — React/Vite evidence dashboard
+**Packages**
+- `packages/sample-app` — Fastify API + BullMQ worker; Redis barriers/trace only when `DELETEPROOF_TEST_HOOKS=1`
+- `packages/runner` — scenarios, CLI (`dp`), HTTP API, Vitest (never imports sample-app internals)
+- `packages/dashboard` — React/Vite evidence UI (real runner API only)
+- `packages/mcp` — thin stdio MCP for IBM Bob (`.bob/mcp.json`)
+- `packages/shared` — shared types / `TargetAdapter`
 
 ## Prerequisites
 
 - Node.js ≥ 20
-- Docker Desktop (for PostgreSQL 16 + Redis 7)
+- **Either** Docker Desktop (PostgreSQL 17 + Redis 7) **or** the embedded path below
 
 ## Quick Start
 
 ```bash
-# 1. Copy environment file
+# 1. Environment
 cp .env.example .env
 
-# 2. Start infrastructure
-docker compose up -d
+# 2. Infrastructure — pick ONE
+docker compose up -d          # preferred when Docker works
+# OR (no Docker):
+npm run services:up           # embedded-postgres + redis-memory-server → .dp-data/
 
-# 3. Install dependencies
+# 3. Install (if not already)
 npm install
 
-# 4. Run database migrations
-npm run migrate -w packages/sample-app
+# 4. Schema
+npm run migrate
 
-# 5. Start the BullMQ worker
-npm run dev:worker -w packages/sample-app &
+# 5. Sample app (exactly one API + one worker — duplicates break barriers)
+npm run start:api
+npm run start:worker
 
-# 6. (Dashboard) Start the runner API
-npx tsx packages/runner/src/server.ts &
+# 6. Verify all scenarios (both modes)
+npm run dp -- verify
 
-# 7. Run the vulnerable reproduction
-npx tsx packages/runner/src/cli.ts run delayed_update_after_deletion vulnerable
+# 7. Single scenario / compare / report
+npm run dp -- run --scenario delayed-update-after-delete --mode vulnerable
+npm run dp -- compare
+npm run dp -- report
 
-# 8. Run the fixed repair
-npx tsx packages/runner/src/cli.ts run delayed_update_after_deletion fixed
-
-# 9. Run all scenarios
-npx tsx packages/runner/src/cli.ts run-all
-
-# 10. Start the dashboard
-npm run dev -w packages/dashboard
+# 8. Runner API + dashboard
+npm run start:runner
+npm run start:dashboard
 # → http://localhost:5173
 ```
+
+Stop embedded services with `npm run services:down` (Docker: `docker compose down`).
 
 ## The Repair
 
 ### Invariant
 Once deletion commits, no async processing may recreate that customer.
 
-### Transaction and Locking Boundaries
+### Fixed path
 
-**Deletion (fixed mode):**
+**Deletion**
 ```sql
-BEGIN;
-SELECT pg_advisory_xact_lock(hash(customerId));  -- exclusive, released on commit
-INSERT INTO tombstones (customer_id, deleted_at, run_id) VALUES (…);
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SET LOCAL application_name = 'dp:{runId}:api';
+SELECT pg_advisory_xact_lock(customer_lock_key(id));
+INSERT INTO customer_tombstones … ON CONFLICT DO NOTHING;
 DELETE FROM customers WHERE id = …;
-COMMIT;  -- tombstone and deletion are atomic
+-- barrier api.before_commit (Redis BLPOP) when test hooks enabled
+COMMIT;
 ```
 
-**Worker (fixed mode):**
+**Worker**
 ```sql
-BEGIN;
-SELECT pg_advisory_xact_lock(hash(customerId));  -- blocks until deletion releases
-SELECT customer_id FROM tombstones WHERE customer_id = …;
--- if found: COMMIT (no write)
--- if absent: upsert customer, COMMIT
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SET LOCAL application_name = 'dp:{runId}:worker';
+SELECT pg_advisory_xact_lock(customer_lock_key(id));
+SELECT … FROM customer_tombstones WHERE customer_id = …;
+-- if found: COMMIT (no write) → blocked_by_tombstone
+-- else: barrier worker.before_write → upsert → COMMIT
 ```
 
-### Both Orderings Are Safe
+Vulnerable mode is the demo fixture: plain `DELETE` and `INSERT … ON CONFLICT DO UPDATE` with no tombstone check.
 
-| Ordering | Outcome |
-|---|---|
-| Deletion acquires lock first | Worker blocks, then sees committed tombstone → skips write |
-| Worker acquires lock first | Worker commits update → deletion acquires lock, inserts tombstone, deletes customer |
+### Barriers (correctness)
 
-A "check tombstone, then write" without the advisory lock is **insufficient**:
-deletion could commit between the check and the write. The advisory lock closes
-that gap by making the check and the write a single critical section.
+Redis only — **no sleep-based barriers for correctness**:
 
-### Why Not In-Memory Locks?
-Advisory locks survive across the separate API and worker processes. In-memory
-locks do not.
+1. Participant: `LPUSH dp:{runId}:ack:{point}` then `BLPOP dp:{runId}:release:{point}`
+2. Runner: waits for ack, observes lock waits via `pg_stat_activity.wait_event_type = 'Lock'`, then releases
+3. On timeout: transaction `ROLLBACK` + `barrier_timeout` trace event
+
+Trace events: `XADD dp:{runId}:trace`
 
 ## Scenarios
 
-| ID | Title | Vulnerable | Fixed |
-|---|---|---|---|
-| `delayed_update_after_deletion` | A: Delayed update after deletion | ❌ resurrects | ✅ absent |
-| `duplicate_stale_delivery` | B: Duplicate stale delivery | ❌ resurrects | ✅ absent |
-| `concurrent_deletion_and_update` | C: Concurrent deletion and processing | ❌ resurrects | ✅ absent |
-| `normal_active_update` | D: Normal active-customer update | ✅ updates | ✅ updates |
-| `unrelated_customer_update` | E: Unrelated customer update | ✅ unaffected | ✅ unaffected |
+| ID | Vulnerable | Fixed |
+|---|---|---|
+| `delayed-update-after-delete` | ❌ resurrects | ✅ absent |
+| `duplicate-stale-delivery` | ❌ resurrects | ✅ absent |
+| `concurrent-delete-update` | ❌ resurrects | ✅ absent (both orderings) |
+| `active-customer-update` | ✅ updates | ✅ updates |
+| `unrelated-customer-update` | ✅ unaffected | ✅ unaffected |
 
-## Verification
+Vulnerable resurrection verdict (exact):
+
+> Resurrection reproduced — deletion invariant failed.
+
+Evidence separates `executionStatus` from `safetyOutcome`
+(`invariant_held` | `invariant_violated` | `not_evaluated`).
+
+## CLI
 
 ```bash
-# Run integration tests (requires live Docker services)
-npm test -w packages/runner
+npm run dp -- list
+npm run dp -- run --scenario <id> --mode <vulnerable|fixed>
+npm run dp -- verify
+npm run dp -- compare
+npm run dp -- report [runId]
 ```
+
+## Verification status
+
+**Verified** (2026-09-26) against **Docker Compose** (`postgres:17-alpine` + `redis:7-alpine`)
+with a live sample-app API + BullMQ worker + runner HTTP API:
+
+| Check | Result |
+|---|---|
+| `docker compose up -d` | healthy |
+| `npm run dp -- verify` | exit 0 — full 10-cell matrix matched expected outcomes |
+| `npm test` | Vitest 6/6 passed |
+| `npm run e2e` | Playwright scenario 1 (vulnerable + fixed) passed |
+
+Vulnerable resurrection verdict observed exactly:
+
+> Resurrection reproduced — deletion invariant failed.
+
+Fallback without Docker: `npm run services:up` (embedded-postgres + redis-memory-server → `.dp-data/`).
 
 ## Limitations
 
-- Demonstrates the invariant for one sample application (PostgreSQL + Redis/BullMQ).
+- One sample application (PostgreSQL + Redis/BullMQ).
 - Synthetic customer data only — no real PII.
-- Tombstone markers are outside any complete data-erasure guarantee.
+- Tombstones are outside any complete data-erasure guarantee.
 - No authentication, multi-tenancy, or production hardening.
-- Docker must be installed and running for verification.
-
-## Evidence
-
-Each run produces a JSON evidence file in `evidence/runs/<runId>.json` containing:
-the run ID, scenario, mode, ordered trace events with timestamps, transaction
-commit acknowledgements, final database assertions, and code revision.
 
 ## License
 

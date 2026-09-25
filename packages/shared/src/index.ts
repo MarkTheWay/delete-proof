@@ -1,56 +1,59 @@
-// ─── Customer Domain ─────────────────────────────────────────────────────────
+/** Shared DeleteProof types — no sample-app imports. */
 
 export interface Customer {
-  id: string;          // immutable UUID – never reused after deletion
+  id: string;
   email: string;
   name: string;
   profile: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+  runId?: string;
 }
 
 export interface Tombstone {
   customerId: string;
   deletedAt: string;
+  runId: string;
 }
 
-// ─── Evidence / Trace ────────────────────────────────────────────────────────
+export type Mode = 'vulnerable' | 'fixed';
+
+export type ScenarioId =
+  | 'delayed-update-after-delete'
+  | 'duplicate-stale-delivery'
+  | 'concurrent-delete-update'
+  | 'active-customer-update'
+  | 'unrelated-customer-update';
 
 export type TraceEventKind =
   | 'customer_created'
   | 'event_queued'
-  | 'barrier_raised'
+  | 'barrier_ack'
+  | 'barrier_released'
+  | 'barrier_timeout'
   | 'customer_deleted'
   | 'deletion_committed'
-  | 'barrier_released'
   | 'worker_processing'
   | 'worker_blocked_by_tombstone'
   | 'worker_write_attempted'
-  | 'worker_write_skipped'
+  | 'worker_write_committed'
+  | 'lock_wait_observed'
   | 'db_assertion'
   | 'invariant_result'
-  | 'error';
+  | 'error'
+  | 'cleanup';
 
 export interface TraceEvent {
-  seq: number;
-  ts: string;           // ISO-8601
+  id?: string;
+  ts: string;
   kind: TraceEventKind;
+  actor?: string;
   message: string;
   data?: Record<string, unknown>;
 }
 
-export type ScenarioId =
-  | 'delayed_update_after_deletion'
-  | 'duplicate_stale_delivery'
-  | 'concurrent_deletion_and_update'
-  | 'normal_active_update'
-  | 'unrelated_customer_update'
-  | 'worker_restart_durability';
-
-export type Mode = 'vulnerable' | 'fixed';
-
 export type ExecutionStatus = 'running' | 'completed' | 'failed';
-export type InvariantStatus = 'held' | 'violated' | 'not_applicable' | 'pending';
+export type SafetyOutcome = 'invariant_held' | 'invariant_violated' | 'not_evaluated';
 
 export interface RunResult {
   runId: string;
@@ -60,39 +63,64 @@ export interface RunResult {
   completedAt?: string;
   durationMs?: number;
   executionStatus: ExecutionStatus;
-  invariantStatus: InvariantStatus;
-  /** Human-readable verdict, e.g. "Resurrection reproduced — deletion invariant failed." */
+  /** Separated from executionStatus — did the deletion invariant hold? */
+  safetyOutcome: SafetyOutcome;
+  /** Human-readable verdict */
   verdict: string;
   trace: TraceEvent[];
   finalCustomerState: Customer | null;
+  tombstonePresent?: boolean;
   errors: string[];
   codeRevision?: string;
   dirtyWorktree?: boolean;
 }
 
-// ─── Adapter interface ───────────────────────────────────────────────────────
+export interface LockWaitState {
+  waiting: boolean;
+  backends: Array<{
+    pid: number;
+    applicationName: string | null;
+    waitEventType: string | null;
+    waitEvent: string | null;
+    state: string | null;
+    query: string | null;
+  }>;
+}
 
 export interface TargetAdapter {
-  /** Migrate / reset schema for a fresh run */
-  setup(runId: string): Promise<void>;
-  /** Remove all data created for this run */
-  teardown(runId: string): Promise<void>;
-  /** Create a synthetic customer, return its ID */
-  createCustomer(runId: string, opts: { email: string; name: string }): Promise<string>;
-  /** Queue a profile-update event (pre-deletion) */
-  queueUpdateEvent(runId: string, customerId: string, payload: Record<string, unknown>): Promise<void>;
-  /** Block worker processing at a named barrier */
-  raiseBarrier(runId: string, name: string): Promise<void>;
-  /** Delete the customer (API path) */
+  createCustomer(
+    runId: string,
+    opts: { email: string; name: string },
+  ): Promise<Customer>;
+  enqueueSync(
+    runId: string,
+    customerId: string,
+    opts: {
+      mode: Mode;
+      profilePatch?: Record<string, unknown>;
+      email?: string;
+      name?: string;
+      jobId?: string;
+    },
+  ): Promise<{ jobId: string }>;
   deleteCustomer(runId: string, customerId: string, mode: Mode): Promise<void>;
-  /** Confirm deletion committed in DB */
-  assertDeleted(runId: string, customerId: string): Promise<boolean>;
-  /** Release named barrier */
-  releaseBarrier(runId: string, name: string): Promise<void>;
-  /** Wait until the queued event has been processed (acknowledged or skipped) */
-  waitForWorker(runId: string, jobId: string, timeoutMs?: number): Promise<void>;
-  /** Query the current customer state */
-  queryCustomer(runId: string, customerId: string): Promise<Customer | null>;
-  /** Subscribe to trace events emitted by the sample app */
-  onTrace(runId: string, cb: (event: TraceEvent) => void): () => void;
+  readCustomer(customerId: string): Promise<Customer | null>;
+  readTombstone(customerId: string): Promise<Tombstone | null>;
+  lockWaitState(runId: string): Promise<LockWaitState>;
+  health(): Promise<{
+    ok: boolean;
+    api: string;
+    postgres: string;
+    redis: string;
+  }>;
+  cleanup(runId: string): Promise<void>;
+  /** Redis barrier: wait until sample-app/worker LPUSH ack for point */
+  waitForBarrierAck(runId: string, point: string, timeoutMs?: number): Promise<void>;
+  /** Redis barrier: LPUSH release so the waiter can leave BLPOP */
+  releaseBarrier(runId: string, point: string): Promise<void>;
+  readTrace(runId: string): Promise<TraceEvent[]>;
 }
+
+/** Exact vulnerable-mode violation string required by DoD */
+export const VULNERABLE_RESURRECTION_VERDICT =
+  'Resurrection reproduced — deletion invariant failed.';
