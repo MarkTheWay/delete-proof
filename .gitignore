@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+*.env.local
+*.env.*.local
+logs/
+*.log
+coverage/
+.nyc_output/
+evidence/runs/
+*.db
+.DS_Store
+Thumbs.db
+# Bob agent skills (global, not project-specific)
+.agents/
+skills-lock.json

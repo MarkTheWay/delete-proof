@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "delete-proof": {
+      "command": "npx",
+      "args": ["tsx", "packages/mcp/src/server.ts"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DATABASE_URL": "postgresql://deleteproof:deleteproof@localhost:5432/deleteproof",
+        "REDIS_URL": "redis://localhost:6379"
+      }
+    }
+  }
+}
