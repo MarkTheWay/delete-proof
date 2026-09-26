@@ -4,6 +4,7 @@
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type {
+  CustomerStateKind,
   ExecutionStatus,
   Mode,
   RunResult,
@@ -31,8 +32,9 @@ export class EvidenceRecorder {
     this.trace.push(event);
   }
 
-  setTrace(events: TraceEvent[]): void {
-    this.trace = events;
+  /** Merge Redis/service events with runner observations (lock waits, assertions). */
+  mergeServiceTrace(events: TraceEvent[]): void {
+    this.trace = [...this.trace, ...events].sort((a, b) => a.ts.localeCompare(b.ts));
   }
 
   addError(msg: string): void {
@@ -45,6 +47,7 @@ export class EvidenceRecorder {
     verdict: string,
     finalCustomerState: Customer | null,
     tombstonePresent?: boolean,
+    customerStateKind: CustomerStateKind = finalCustomerState ? 'present' : 'absent',
   ): RunResult {
     const completedAt = new Date().toISOString();
     const durationMs =
@@ -78,6 +81,7 @@ export class EvidenceRecorder {
       verdict,
       trace: this.trace,
       finalCustomerState,
+      customerStateKind,
       tombstonePresent,
       errors: this.errors,
       codeRevision,

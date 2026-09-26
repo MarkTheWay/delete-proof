@@ -102,6 +102,9 @@ app.post<{
   if (!runId || !mode) {
     return reply.code(400).send({ error: 'runId and mode required' });
   }
+  if (mode !== 'vulnerable' && mode !== 'fixed') {
+    return reply.code(400).send({ error: 'mode must be vulnerable or fixed' });
+  }
   const customerId = req.params.id;
   const id = jobId ?? randomUUID();
 
@@ -146,6 +149,9 @@ app.delete<{
   const { runId, mode } = req.body ?? {};
   if (!runId || !mode) {
     return reply.code(400).send({ error: 'runId and mode required' });
+  }
+  if (mode !== 'vulnerable' && mode !== 'fixed') {
+    return reply.code(400).send({ error: 'mode must be vulnerable or fixed' });
   }
   const customerId = req.params.id;
   const pool = getPool();

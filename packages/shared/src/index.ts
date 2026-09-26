@@ -55,6 +55,9 @@ export interface TraceEvent {
 export type ExecutionStatus = 'running' | 'completed' | 'failed';
 export type SafetyOutcome = 'invariant_held' | 'invariant_violated' | 'not_evaluated';
 
+/** Whether finalCustomerState was actually observed (vs failed/unknown). */
+export type CustomerStateKind = 'present' | 'absent' | 'unknown';
+
 export interface RunResult {
   runId: string;
   scenario: ScenarioId;
@@ -69,6 +72,11 @@ export interface RunResult {
   verdict: string;
   trace: TraceEvent[];
   finalCustomerState: Customer | null;
+  /**
+   * Distinguishes observed absence from “never read / failed before assert”.
+   * `null` finalCustomerState + `absent` = deleted; + `unknown` = not observed.
+   */
+  customerStateKind?: CustomerStateKind;
   tombstonePresent?: boolean;
   errors: string[];
   codeRevision?: string;
@@ -112,6 +120,8 @@ export interface TargetAdapter {
     api: string;
     postgres: string;
     redis: string;
+    worker?: string;
+    testHooks?: string;
   }>;
   cleanup(runId: string): Promise<void>;
   /** Redis barrier: wait until sample-app/worker LPUSH ack for point */

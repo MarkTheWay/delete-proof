@@ -46,7 +46,7 @@ export function redisUrl(): string {
 }
 
 export function sampleAppPort(): number {
-  return Number(process.env.SAMPLE_APP_PORT ?? 3000);
+  return Number(process.env.SAMPLE_APP_PORT ?? 3100);
 }
 
 export const QUEUE_NAME = 'dp-profile-sync';

@@ -37,8 +37,9 @@ export function redisUrl(): string {
 }
 
 export function sampleAppBaseUrl(): string {
-  const port = process.env.SAMPLE_APP_PORT ?? '3000';
-  return process.env.SAMPLE_APP_URL ?? `http://localhost:${port}`;
+  const port = process.env.SAMPLE_APP_PORT ?? '3100';
+  // Prefer 127.0.0.1 — on Windows, localhost can resolve to ::1 and hit another app.
+  return process.env.SAMPLE_APP_URL ?? `http://127.0.0.1:${port}`;
 }
 
 export function barrierTimeoutMs(): number {

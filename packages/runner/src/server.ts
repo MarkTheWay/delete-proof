@@ -35,6 +35,8 @@ app.get('/readiness', async (_req, reply) => {
       postgres: h.postgres,
       redis: h.redis,
       api: h.api,
+      worker: h.worker,
+      testHooks: h.testHooks,
       status: h.ok ? 'ready' : 'not_ready',
     });
   } finally {
@@ -66,6 +68,12 @@ app.post<{ Body: { scenario: ScenarioId; mode: Mode } }>('/runs', async (req, re
   const { scenario, mode } = req.body ?? {};
   if (!scenario || !mode) {
     return reply.code(400).send({ error: 'scenario and mode are required' });
+  }
+  if (!SCENARIOS.some((s) => s.id === scenario)) {
+    return reply.code(400).send({ error: `unknown scenario: ${scenario}` });
+  }
+  if (mode !== 'vulnerable' && mode !== 'fixed') {
+    return reply.code(400).send({ error: 'mode must be vulnerable or fixed' });
   }
   const adapter = new SampleAppAdapter();
   try {

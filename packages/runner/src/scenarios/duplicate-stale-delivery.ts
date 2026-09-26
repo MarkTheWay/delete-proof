@@ -79,6 +79,12 @@ export async function runDuplicateStaleDelivery(
 
     const final = await adapter.readCustomer(customer.id);
     const { safetyOutcome, verdict } = resurrectionVerdict(mode, final !== null);
-    return { safetyOutcome, verdict, customerId: customer.id };
+    return {
+      safetyOutcome,
+      verdict,
+      customerId: customer.id,
+      finalCustomerState: final,
+      customerStateKind: final ? 'present' : 'absent',
+    };
   });
 }

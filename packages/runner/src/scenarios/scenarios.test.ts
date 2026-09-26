@@ -41,6 +41,9 @@ describe('delayed-update-after-delete', () => {
     expect(result.executionStatus).toBe('completed');
     expect(result.safetyOutcome).toBe('invariant_held');
     expect(result.finalCustomerState).toBeNull();
+    expect(result.customerStateKind).toBe('absent');
+    expect(result.trace.some((e) => e.kind === 'lock_wait_observed')).toBe(true);
+    expect(result.trace.some((e) => e.kind === 'worker_blocked_by_tombstone')).toBe(true);
   });
 });
 
@@ -58,6 +61,9 @@ describe('concurrent-delete-update', () => {
     const result = await runConcurrentDeleteUpdate(adapter, 'fixed');
     expect(result.executionStatus).toBe('completed');
     expect(result.safetyOutcome).toBe('invariant_held');
+    expect(result.customerStateKind).toBe('absent');
+    const lockWaits = result.trace.filter((e) => e.kind === 'lock_wait_observed');
+    expect(lockWaits.length).toBeGreaterThanOrEqual(2);
   });
 });
 
@@ -67,6 +73,7 @@ describe('active-customer-update', () => {
     expect(result.executionStatus).toBe('completed');
     expect(result.safetyOutcome).toBe('invariant_held');
     expect(result.finalCustomerState).not.toBeNull();
+    expect((result.finalCustomerState as { profile: { plan: string } }).profile.plan).toBe('pro');
   });
 });
 
@@ -76,5 +83,8 @@ describe('unrelated-customer-update', () => {
     expect(result.executionStatus).toBe('completed');
     expect(result.safetyOutcome).toBe('invariant_held');
     expect(result.finalCustomerState).not.toBeNull();
+    expect(
+      (result.finalCustomerState as { profile: { feature: string } }).profile.feature,
+    ).toBe('unrelated-update');
   });
 });

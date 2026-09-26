@@ -1,5 +1,5 @@
 /**
- * active-customer-update — no deletion; sync must succeed.
+ * active-customer-update — no deletion; sync must succeed with expected profile.
  */
 import type { Mode, RunResult } from '@delete-proof/shared';
 import type { SampleAppAdapter } from '../adapters/SampleAppAdapter.js';
@@ -27,30 +27,55 @@ export async function runActiveCustomerUpdate(
       name: customer.name,
     });
 
-    // Both modes hit worker.before_write when no tombstone (fixed) / always (vulnerable)
     await adapter.waitForBarrierAck(runId, 'worker.before_write');
     await adapter.releaseBarrier(runId, 'worker.before_write');
     await adapter.waitForTraceKind(runId, ['worker_write_committed']);
 
     const final = await adapter.readCustomer(customer.id);
-    if (final !== null && (final.profile as Record<string, unknown>)?.plan === 'pro') {
+    const profile = (final?.profile ?? {}) as Record<string, unknown>;
+    const expectedPlan = 'pro';
+    const expectedBy = 'active-customer-update';
+
+    rec.addTrace({
+      ts: new Date().toISOString(),
+      kind: 'db_assertion',
+      message: `Assert profile.plan=${expectedPlan} updatedBy=${expectedBy}`,
+      data: {
+        expected: { plan: expectedPlan, updatedBy: expectedBy, present: true },
+        actual: {
+          present: final !== null,
+          plan: profile.plan ?? null,
+          updatedBy: profile.updatedBy ?? null,
+        },
+      },
+    });
+
+    if (final === null) {
       return {
-        safetyOutcome: 'invariant_held',
-        verdict: 'Normal update succeeded — active customer profile updated correctly.',
+        safetyOutcome: 'invariant_violated',
+        verdict: 'UNEXPECTED: Active customer was not present after normal update.',
         customerId: customer.id,
+        finalCustomerState: null,
+        customerStateKind: 'absent',
       };
     }
-    if (final !== null) {
+
+    if (profile.plan !== expectedPlan || profile.updatedBy !== expectedBy) {
       return {
-        safetyOutcome: 'invariant_held',
-        verdict: 'Customer present after update (profile merge may differ by mode).',
+        safetyOutcome: 'invariant_violated',
+        verdict: `UNEXPECTED: Active update did not apply profile (plan=${String(profile.plan)}, updatedBy=${String(profile.updatedBy)}).`,
         customerId: customer.id,
+        finalCustomerState: final,
+        customerStateKind: 'present',
       };
     }
+
     return {
-      safetyOutcome: 'invariant_violated',
-      verdict: 'UNEXPECTED: Active customer was not present after normal update.',
+      safetyOutcome: 'invariant_held',
+      verdict: 'Normal update succeeded — active customer profile updated correctly.',
       customerId: customer.id,
+      finalCustomerState: final,
+      customerStateKind: 'present',
     };
   });
 }

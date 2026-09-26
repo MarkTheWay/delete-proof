@@ -209,9 +209,24 @@ function printRun(result: RunResult): void {
 
   console.log('');
   console.log(`  ${bold('RESULT')}`);
-  if (result.finalCustomerState) {
-    console.log(selectedLine('-', 'Final customer state: present (resurrected)'));
-    console.log(selectedLine('-', JSON.stringify(result.finalCustomerState)));
+  const kind = result.customerStateKind
+    ?? (result.executionStatus === 'failed' || result.safetyOutcome === 'not_evaluated'
+      ? 'unknown'
+      : result.finalCustomerState
+        ? 'present'
+        : 'absent');
+  if (kind === 'unknown') {
+    console.log(selectedLine('-', 'Final customer state: unknown (not observed)'));
+  } else if (result.finalCustomerState) {
+    const note =
+      result.safetyOutcome === 'invariant_violated' ? 'present (resurrected)' : 'present';
+    console.log(selectedLine(result.safetyOutcome === 'invariant_violated' ? '-' : '+', `Final customer state: ${note}`));
+    console.log(
+      selectedLine(
+        result.safetyOutcome === 'invariant_violated' ? '-' : '+',
+        JSON.stringify(result.finalCustomerState),
+      ),
+    );
   } else {
     console.log(selectedLine('+', 'Final customer state: absent (null)'));
   }
@@ -349,6 +364,12 @@ void (async () => {
       if (!health.ok) {
         console.error(red('  Services not ready. Start docker, migrate, api, and worker first.'));
         console.error(`  ${dim(JSON.stringify(health))}`);
+        console.error(
+          dim(
+            '  Tip: if another app uses localhost:3000, set SAMPLE_APP_URL=http://127.0.0.1:3000',
+          ),
+        );
+        await adapter.close();
         process.exit(1);
       }
 
@@ -371,6 +392,12 @@ void (async () => {
       if (!health.ok) {
         console.error(red('  Services not ready — start docker, migrate, api, and worker first.'));
         console.error(`  ${dim(JSON.stringify(health))}`);
+        console.error(
+          dim(
+            '  Tip: if another app uses localhost:3000, set SAMPLE_APP_URL=http://127.0.0.1:3000',
+          ),
+        );
+        await adapter.close();
         process.exit(1);
       }
 

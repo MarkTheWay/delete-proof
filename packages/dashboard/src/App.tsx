@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 
 // ─── Types (inline to avoid shared package dep in dashboard) ─────────────────
 interface TraceEvent {
-  seq: number;
+  id?: string;
   ts: string;
   kind: string;
   message: string;
@@ -17,13 +17,12 @@ interface RunResult {
   completedAt?: string;
   durationMs?: number;
   executionStatus: 'running' | 'completed' | 'failed';
-  /** DoD field — preferred over legacy invariantStatus */
   safetyOutcome?: 'invariant_held' | 'invariant_violated' | 'not_evaluated';
-  /** Legacy field kept for older evidence files */
   invariantStatus?: 'held' | 'violated' | 'not_applicable' | 'pending';
   verdict: string;
   trace: TraceEvent[];
   finalCustomerState: unknown | null;
+  customerStateKind?: 'present' | 'absent' | 'unknown';
   errors: string[];
   codeRevision?: string;
   dirtyWorktree?: boolean;
@@ -36,6 +35,14 @@ function safetyLabel(run: RunResult): string {
   return run.invariantStatus ?? 'not_evaluated';
 }
 
+function resolveCustomerKind(run: RunResult): 'present' | 'absent' | 'unknown' {
+  if (run.customerStateKind) return run.customerStateKind;
+  if (run.executionStatus === 'failed' || run.safetyOutcome === 'not_evaluated') {
+    return 'unknown';
+  }
+  return run.finalCustomerState ? 'present' : 'absent';
+}
+
 interface ScenarioMeta {
   id: string;
   title: string;
@@ -46,6 +53,9 @@ interface ScenarioMeta {
 interface Readiness {
   postgres: string;
   redis: string;
+  api?: string;
+  worker?: string;
+  testHooks?: string;
   status: string;
 }
 
@@ -130,12 +140,12 @@ function Timeline({ trace }: { trace: TraceEvent[] }) {
   if (!trace.length) return <p style={{ color: 'var(--muted)' }}>No trace events.</p>;
   return (
     <ol style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-      {trace.map((e) => (
-        <li key={e.seq} style={{
+      {trace.map((e, i) => (
+        <li key={e.id ?? `${e.ts}-${e.kind}-${i}`} style={{
           display: 'flex', gap: 12, padding: '5px 0',
           borderBottom: '1px solid var(--border)', fontSize: 12,
         }}>
-          <span style={{ color: 'var(--muted)', minWidth: 28, textAlign: 'right' }}>{e.seq}</span>
+          <span style={{ color: 'var(--muted)', minWidth: 28, textAlign: 'right' }}>{i + 1}</span>
           <span style={{ color: 'var(--muted)', minWidth: 80 }}>{e.ts.slice(11, 23)}</span>
           <span style={{
             minWidth: 220, color: kindColor(e.kind),
@@ -156,16 +166,30 @@ function kindColor(kind: string): string {
   return 'var(--muted)';
 }
 
-function CustomerState({ state, label }: { state: unknown; label: string }) {
+function CustomerState({
+  state,
+  kind,
+  label,
+}: {
+  state: unknown;
+  kind: 'present' | 'absent' | 'unknown';
+  label: string;
+}) {
   return (
     <div>
       <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 4 }}>{label}</div>
-      {state === null || state === undefined ? (
+      {kind === 'unknown' ? (
+        <div style={{
+          padding: '10px 14px', borderRadius: 6,
+          background: '#1a1a0f', border: '1px solid var(--yellow)',
+          color: 'var(--yellow)', fontWeight: 600,
+        }}>unknown — not observed (execution failed or incomplete)</div>
+      ) : kind === 'absent' ? (
         <div style={{
           padding: '10px 14px', borderRadius: 6,
           background: '#1a0f0f', border: '1px solid var(--red)',
           color: 'var(--red)', fontWeight: 600,
-        }}>absent (null) — deleted ✓</div>
+        }}>absent (null) — observed deleted</div>
       ) : (
         <pre style={{
           padding: '10px 14px', borderRadius: 6,
@@ -228,7 +252,11 @@ function ComparisonPanel({ runs }: { runs: RunResult[] }) {
                 <InvariantBadge status={safetyLabel(run)} />
                 <p style={{ fontSize: 12, marginTop: 8, color: 'var(--muted)', fontStyle: 'italic' }}>{run.verdict}</p>
                 <div style={{ marginTop: 12 }}>
-                  <CustomerState state={run.finalCustomerState} label="Final customer state" />
+                  <CustomerState
+                    state={run.finalCustomerState}
+                    kind={resolveCustomerKind(run)}
+                    label="Final customer state"
+                  />
                 </div>
               </>
             ) : (
@@ -267,12 +295,13 @@ export default function App() {
     setRunning(true);
     setRunError(null);
     try {
-      await apiFetch<RunResult>('/runs', {
+      const result = await apiFetch<RunResult>('/runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scenario: selectedScenario, mode: selectedMode }),
       });
       await refetchRuns();
+      setSelectedRunId(result.runId);
     } catch (e) {
       setRunError(String(e));
     }
@@ -280,6 +309,9 @@ export default function App() {
   }
 
   const sameScenarioRuns = runs.filter((r) => r.scenario === (selectedRun?.scenario ?? selectedScenario));
+  const beforeObserved = selectedRun
+    ? selectedRun.trace.some((e) => e.kind === 'customer_created')
+    : false;
 
   return (
     <div style={{ maxWidth: 1100, margin: '0 auto', padding: '24px 20px' }}>
@@ -303,8 +335,11 @@ export default function App() {
           <span style={{ color: 'var(--red)', fontSize: 12 }}>⚠️ Runner API unreachable — start the server first</span>
         ) : ready ? (
           <>
+            <ServiceBadge name="API" status={ready.api ?? 'unknown'} />
             <ServiceBadge name="PostgreSQL" status={ready.postgres} />
             <ServiceBadge name="Redis" status={ready.redis} />
+            <ServiceBadge name="Worker" status={ready.worker ?? 'unknown'} />
+            <ServiceBadge name="Test hooks" status={ready.testHooks ?? 'unknown'} />
           </>
         ) : (
           <span style={{ color: 'var(--muted)', fontSize: 12 }}>Checking…</span>
@@ -440,10 +475,18 @@ export default function App() {
               }}>
                 <div style={{ padding: 14, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)' }}>
                   <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>BEFORE DELETION</div>
-                  <div style={{ fontSize: 12, color: 'var(--green)' }}>✓ Customer existed (synthetic fixture)</div>
+                  {beforeObserved ? (
+                    <div style={{ fontSize: 12, color: 'var(--green)' }}>Customer created (trace observed)</div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: 'var(--yellow)' }}>Unknown — no customer_created in trace</div>
+                  )}
                 </div>
                 <div style={{ padding: 14, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)' }}>
-                  <CustomerState state={selectedRun.finalCustomerState} label="AFTER SCENARIO" />
+                  <CustomerState
+                    state={selectedRun.finalCustomerState}
+                    kind={resolveCustomerKind(selectedRun)}
+                    label="AFTER SCENARIO"
+                  />
                 </div>
               </div>
 

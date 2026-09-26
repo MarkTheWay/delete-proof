@@ -15,6 +15,7 @@ import type {
 import {
   armJobReceivedBarrier as redisArmJobReceived,
   cleanupRedisRun,
+  closeRedis,
   getRedis,
   releaseBarrier as redisReleaseBarrier,
   traceKey,
@@ -203,13 +204,29 @@ export class SampleAppAdapter implements TargetAdapter {
     api: string;
     postgres: string;
     redis: string;
+    worker: string;
+    testHooks: string;
   }> {
     let api = 'error';
     let postgres = 'error';
     let redis = 'error';
+    let worker = 'error';
+    let testHooks = 'error';
+
     try {
-      const res = await fetch(`${this.baseUrl}/health`);
-      api = res.ok ? 'ok' : 'error';
+      const res = await fetch(`${this.baseUrl}/health`, {
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { ok?: boolean; service?: string; testHooks?: boolean };
+        if (body.service === 'sample-app' && body.ok === true) {
+          api = 'ok';
+          testHooks = body.testHooks === true ? 'ok' : 'disabled';
+        } else {
+          api = 'error';
+          testHooks = 'error';
+        }
+      }
     } catch {
       api = 'error';
     }
@@ -220,12 +237,25 @@ export class SampleAppAdapter implements TargetAdapter {
       postgres = 'error';
     }
     try {
-      const pong = await getRedis().ping();
+      const r = getRedis();
+      const pong = await r.ping();
       redis = pong === 'PONG' ? 'ok' : 'error';
+      if (redis === 'ok') {
+        const hb = await r.get('dp:worker:heartbeat');
+        worker = hb ? 'ok' : 'error';
+      }
     } catch {
       redis = 'error';
+      worker = 'error';
     }
-    return { ok: api === 'ok' && postgres === 'ok' && redis === 'ok', api, postgres, redis };
+
+    const ok =
+      api === 'ok' &&
+      postgres === 'ok' &&
+      redis === 'ok' &&
+      worker === 'ok' &&
+      testHooks === 'ok';
+    return { ok, api, postgres, redis, worker, testHooks };
   }
 
   async cleanup(runId: string): Promise<void> {
@@ -327,6 +357,7 @@ export class SampleAppAdapter implements TargetAdapter {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    await this.pool.end().catch(() => undefined);
+    await closeRedis();
   }
 }
