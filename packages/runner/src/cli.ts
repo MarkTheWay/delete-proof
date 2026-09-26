@@ -8,9 +8,9 @@
  *   npm run dp -- compare
  *   npm run dp -- report [runId]
  *
- * Output uses Claude Code / git-diff style colors:
- *   green = held / fixed / blocked / absent
- *   red   = violated / vulnerable / delete / resurrection
+ * Selected-diff coloring (Claude Code style):
+ *   green background = held / blocked / absent
+ *   red background   = violated / delete / resurrection
  */
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -24,8 +24,9 @@ loadEnv();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = resolve(__dirname, '../../../evidence/runs');
+const VERSION = '0.1.0';
 
-// ─── Claude Code–style ANSI (git-diff red/green) ─────────────────────────────
+// ─── ANSI ────────────────────────────────────────────────────────────────────
 const useColor =
   process.env.FORCE_COLOR !== '0' &&
   process.env.NO_COLOR == null &&
@@ -38,11 +39,24 @@ const c = {
   red: useColor ? '\x1b[31m' : '',
   green: useColor ? '\x1b[32m' : '',
   yellow: useColor ? '\x1b[33m' : '',
-  cyan: useColor ? '\x1b[36m' : '',
-  // Claude Code–like soft tones
-  redBright: useColor ? '\x1b[91m' : '',
-  greenBright: useColor ? '\x1b[92m' : '',
+  white: useColor ? '\x1b[37m' : '',
+  // brand accent (cool cyan — not purple)
+  brand: useColor ? '\x1b[38;2;94;210;220m' : '',
+  brandDim: useColor ? '\x1b[38;2;60;130;140m' : '',
+  // Claude Code selected diffs
+  addBg: useColor ? '\x1b[48;2;12;42;18m' : '',
+  addFg: useColor ? '\x1b[38;2;120;220;140m' : '',
+  delBg: useColor ? '\x1b[48;2;52;14;14m' : '',
+  delFg: useColor ? '\x1b[38;2;248;130;130m' : '',
 };
+
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function termWidth(): number {
+  return Math.max(48, Math.min(100, process.stdout.columns ?? 80));
+}
 
 function red(s: string): string {
   return `${c.red}${s}${c.reset}`;
@@ -58,6 +72,37 @@ function bold(s: string): string {
 }
 function yellow(s: string): string {
   return `${c.yellow}${s}${c.reset}`;
+}
+function brand(s: string): string {
+  return `${c.brand}${s}${c.reset}`;
+}
+
+/** Full-width selected line — background fills like Claude Code diffs */
+function selectedLine(sign: '+' | '-', body: string): string {
+  const prefix = sign === '+' ? '+ ' : '- ';
+  const plain = prefix + stripAnsi(body);
+  const width = termWidth();
+  const padded =
+    plain.length >= width ? plain.slice(0, width) : plain + ' '.repeat(width - plain.length);
+  if (!useColor) return padded;
+  const style = sign === '+' ? `${c.addBg}${c.addFg}` : `${c.delBg}${c.delFg}`;
+  return `${style}${padded}${c.reset}`;
+}
+
+function rule(ch = '─', color?: (s: string) => string): string {
+  const line = ch.repeat(termWidth());
+  return color ? color(line) : dim(line);
+}
+
+function kv(label: string, value: string): void {
+  console.log(`  ${dim(label.padEnd(16))} ${value}`);
+}
+
+function badge(kind: 'ok' | 'bad' | 'warn' | 'info', text: string): string {
+  if (kind === 'ok') return green(`● ${text}`);
+  if (kind === 'bad') return red(`● ${text}`);
+  if (kind === 'warn') return yellow(`● ${text}`);
+  return dim(`○ ${text}`);
 }
 
 function modeLabel(mode: Mode): string {
@@ -77,37 +122,47 @@ function verdictLine(result: RunResult): string {
   return yellow(v);
 }
 
-function diffLine(sign: '+' | '-' | ' ', text: string): string {
-  if (sign === '+') return `${c.green}+ ${text}${c.reset}`;
-  if (sign === '-') return `${c.red}- ${text}${c.reset}`;
-  return `  ${text}`;
-}
+// ─── Logo ────────────────────────────────────────────────────────────────────
+/**
+ * Compact wordmark — fits ~64 cols. Wide terminals get the full block.
+ */
+const LOGO_FULL = [
+  '  ____       _      _       ____                  __ ',
+  ' |  _ \\  ___| | ___| |_ ___|  _ \\ _ __ ___   ___ / _|',
+  ' | | | |/ _ \\ |/ _ \\ __/ _ \\ |_) | \'__/ _ \\ / _ \\ |_ ',
+  ' | |_| |  __/ |  __/ ||  __/  __/| | | (_) | (_) |  _|',
+  ' |____/ \\___|_|\\___|\\__\\___|_|   |_|  \\___/ \\___/|_| ',
+];
 
-function colorKind(kind: string): string {
-  if (kind.includes('blocked_by_tombstone') || kind.includes('skipped')) return green(kind);
-  if (
-    kind.includes('deletion') ||
-    kind.includes('deleted') ||
-    kind.includes('write_committed') ||
-    kind.includes('write_attempted') ||
-    kind.includes('violat')
-  ) {
-    return red(kind);
+const LOGO_COMPACT = [
+  '  ┌─────────────────────────────────┐',
+  '  │  D E L E T E · P R O O F         │',
+  '  │  reproduce → repair → verify     │',
+  '  └─────────────────────────────────┘',
+];
+
+function printLogo(opts?: { compact?: boolean }): void {
+  const wide = termWidth() >= 64 && !opts?.compact;
+  const lines = wide ? LOGO_FULL : LOGO_COMPACT;
+  console.log('');
+  for (const line of lines) {
+    console.log(brand(line));
   }
-  if (kind.includes('barrier')) return yellow(kind);
-  if (kind.includes('created') || kind.includes('queued')) return green(kind);
-  return dim(kind);
+  console.log(
+    `  ${dim('ghost-write verifier')}  ${c.brandDim}v${VERSION}${c.reset}  ${dim('·')}  ${dim('IBM Bob hackathon')}`,
+  );
+  console.log(rule('─', brand));
 }
 
-function colorMessage(kind: string, message: string): string {
-  if (kind.includes('blocked_by_tombstone')) return green(message);
-  if (message.includes('[VULNERABLE]') || message.includes('resurrect')) return red(message);
-  if (message.includes('[FIXED]') && message.includes('tombstone')) return green(message);
-  if (message.includes('[FIXED]')) return dim(message);
-  if (kind.includes('deletion') || kind.includes('deleted')) return red(message);
-  return message;
+function printSection(title: string, tone: 'ok' | 'bad' | 'neutral' = 'neutral'): void {
+  const color = tone === 'ok' ? green : tone === 'bad' ? red : (s: string) => dim(s);
+  console.log('');
+  console.log(color(rule('─')));
+  console.log(`  ${bold(title)}`);
+  console.log(color(rule('─')));
 }
 
+// ─── Run output ──────────────────────────────────────────────────────────────
 function saveRun(result: RunResult): string {
   mkdirSync(EVIDENCE_DIR, { recursive: true });
   const file = join(EVIDENCE_DIR, `${result.runId}.json`);
@@ -119,53 +174,46 @@ function printRun(result: RunResult): void {
   const held = result.safetyOutcome === 'invariant_held';
   const violated = result.safetyOutcome === 'invariant_violated';
   const failed = result.executionStatus === 'failed';
+  const tone: 'ok' | 'bad' | 'neutral' = held ? 'ok' : violated || failed ? 'bad' : 'neutral';
 
-  const headerIcon = held ? green('●') : violated ? red('●') : failed ? yellow('●') : dim('○');
-  const banner =
-    held
-      ? green('────────────────────────────────────────')
-      : violated
-        ? red('────────────────────────────────────────')
-        : dim('────────────────────────────────────────');
+  const status = held
+    ? badge('ok', 'INVARIANT HELD')
+    : violated
+      ? badge('bad', 'INVARIANT VIOLATED')
+      : failed
+        ? badge('warn', 'EXECUTION FAILED')
+        : badge('info', 'NOT EVALUATED');
 
-  console.log(`\n${banner}`);
-  console.log(`${headerIcon}  ${bold(result.scenario)}  [${modeLabel(result.mode)}]`);
-  console.log(banner);
-
-  console.log(`   ${dim('Run ID         :')} ${result.runId}`);
-  console.log(`   ${dim('Execution      :')} ${result.executionStatus}`);
-  console.log(`   ${dim('Safety outcome :')} ${safetyLine(result.safetyOutcome)}`);
-  console.log(`   ${dim('Verdict        :')} ${verdictLine(result)}`);
-  console.log(`   ${dim('Duration       :')} ${result.durationMs}ms`);
+  printSection(`${result.scenario}  ·  ${result.mode}`, tone);
+  console.log(`  ${status}`);
+  console.log('');
+  kv('Run ID', result.runId);
+  kv('Execution', result.executionStatus);
+  kv('Safety', safetyLine(result.safetyOutcome));
+  kv('Verdict', verdictLine(result));
+  kv('Duration', `${result.durationMs} ms`);
   if (result.codeRevision) {
-    console.log(
-      `   ${dim('Revision       :')} ${result.codeRevision}${result.dirtyWorktree ? ' (dirty)' : ''}`,
-    );
+    kv('Revision', `${result.codeRevision}${result.dirtyWorktree ? dim(' (dirty)') : ''}`);
   }
   if (result.errors.length > 0) {
-    console.log(`   ${red('Errors         :')} ${red(result.errors.join('; '))}`);
+    kv('Errors', red(result.errors.join('; ')));
   }
 
-  console.log(`\n   ${bold('Trace')} ${dim('(git-diff style: − delete/resurrect  + safe/blocked)')}`);
+  console.log('');
+  console.log(`  ${bold('TRACE')}  ${dim('+ held / blocked     − delete / resurrect')}`);
+  console.log(dim('  ' + '─'.repeat(Math.min(termWidth() - 2, 56))));
+
   for (const [i, e] of result.trace.entries()) {
     printTraceEvent(i + 1, e);
   }
 
   console.log('');
+  console.log(`  ${bold('RESULT')}`);
   if (result.finalCustomerState) {
-    console.log(
-      diffLine(
-        '-',
-        `${bold('Final customer state:')} present ${dim('(resurrected / still there)')}`,
-      ),
-    );
-    console.log(
-      `${c.red}    ${JSON.stringify(result.finalCustomerState)}${c.reset}`,
-    );
+    console.log(selectedLine('-', 'Final customer state: present (resurrected)'));
+    console.log(selectedLine('-', JSON.stringify(result.finalCustomerState)));
   } else {
-    console.log(
-      diffLine('+', `${bold('Final customer state:')} ${green('absent (null)')}`),
-    );
+    console.log(selectedLine('+', 'Final customer state: absent (null)'));
   }
 }
 
@@ -181,17 +229,14 @@ function printTraceEvent(n: number, e: TraceEvent): void {
   else if (kind.includes('deletion') || kind.includes('deleted')) sign = '-';
   else if (kind.includes('customer_created')) sign = '+';
 
-  const idx = dim(`[${String(n).padStart(3)}]`);
-  const ts = dim(e.ts.slice(11, 23));
-  const kindCol = colorKind(kind.padEnd(32));
-  const msg = colorMessage(kind, e.message);
+  const idx = String(n).padStart(3);
+  const ts = e.ts.slice(11, 23);
+  const body = `[${idx}] ${ts}  ${kind.padEnd(30)} ${e.message}`;
 
-  if (sign === '+') {
-    console.log(`     ${c.green}+${c.reset} ${idx} ${ts}  ${kindCol} ${msg}`);
-  } else if (sign === '-') {
-    console.log(`     ${c.red}-${c.reset} ${idx} ${ts}  ${kindCol} ${msg}`);
+  if (sign === '+' || sign === '-') {
+    console.log(selectedLine(sign, body));
   } else {
-    console.log(`       ${idx} ${ts}  ${kindCol} ${msg}`);
+    console.log(`  ${dim(`[${idx}]`)} ${dim(ts)}  ${dim(kind.padEnd(30))} ${e.message}`);
   }
 }
 
@@ -228,27 +273,52 @@ function expectedSafety(scenario: ScenarioId, mode: Mode): string {
   return 'invariant_held';
 }
 
+function printHelp(): void {
+  printLogo();
+  console.log(`
+  ${bold('USAGE')}
+    npm run dp -- <command> [options]
+
+  ${bold('COMMANDS')}
+    ${brand('list')}                              List scenarios
+    ${brand('run')}    --scenario <id> --mode <m> Run one scenario
+    ${brand('verify')}                            Full 10-cell matrix
+    ${brand('compare')}                           Latest vulnerable vs fixed
+    ${brand('report')} [runId]                    Replay saved evidence
+
+  ${bold('MODES')}
+    ${red('vulnerable')}   Naive upsert — demonstrates resurrection
+    ${green('fixed')}        Tombstone + advisory lock — holds invariant
+
+  ${bold('DEMO')}
+    npm run dp -- run --scenario delayed-update-after-delete --mode vulnerable
+    npm run dp -- run --scenario delayed-update-after-delete --mode fixed
+
+  ${dim('Tip: Windows Terminal or VS Code for full selected-line colors.')}
+`);
+}
+
+// ─── Main ────────────────────────────────────────────────────────────────────
 void (async () => {
-  // Help Windows terminals show ANSI when supported
   if (process.platform === 'win32' && useColor) {
-    try {
-      // Enable VT processing hint for older Windows consoles
-      process.env.FORCE_COLOR ??= '1';
-    } catch {
-      /* ignore */
-    }
+    process.env.FORCE_COLOR ??= '1';
   }
 
   const { command, scenario, mode, positional } = parseArgs(process.argv.slice(2));
 
   switch (command) {
     case 'list': {
-      console.log(`\n${bold('Available DeleteProof scenarios')}\n`);
+      printLogo();
+      console.log(`\n  ${bold('SCENARIOS')}\n`);
       for (const s of SCENARIOS) {
-        console.log(`  ${cyanId(s.id)}`);
+        console.log(`  ${brand('▸')} ${bold(s.id)}`);
         console.log(`    ${s.title}`);
         console.log(`    ${dim(s.description)}`);
-        console.log(`    Modes: ${s.supportedModes.map((m) => (m === 'fixed' ? green(m) : red(m))).join(', ')}\n`);
+        console.log(
+          `    ${dim('modes')}  ${s.supportedModes
+            .map((m) => (m === 'fixed' ? green(m) : red(m)))
+            .join(dim(' · '))}\n`,
+        );
       }
       break;
     }
@@ -257,42 +327,50 @@ void (async () => {
       const scenarioId = (scenario ?? positional[0]) as ScenarioId | undefined;
       const runMode = (mode ?? positional[1]) as Mode | undefined;
       if (!scenarioId || !runMode) {
-        console.error('Usage: dp run --scenario <id> --mode <vulnerable|fixed>');
+        console.error(red('Usage: dp run --scenario <id> --mode <vulnerable|fixed>'));
         process.exit(1);
       }
       if (!SCENARIOS.some((s) => s.id === scenarioId)) {
-        console.error(`Unknown scenario: ${scenarioId}`);
+        console.error(red(`Unknown scenario: ${scenarioId}`));
         process.exit(1);
       }
       if (runMode !== 'vulnerable' && runMode !== 'fixed') {
-        console.error(`Invalid mode: ${runMode}`);
+        console.error(red(`Invalid mode: ${runMode}`));
         process.exit(1);
       }
 
+      printLogo({ compact: true });
       console.log(
-        `\n${dim('Running')} ${bold(scenarioId)} ${dim('in')} ${modeLabel(runMode)} ${dim('mode…')}`,
+        `\n  ${dim('running')}  ${bold(scenarioId)}  ${dim('·')}  ${modeLabel(runMode)}\n`,
       );
+
       const adapter = new SampleAppAdapter();
       const health = await adapter.health();
       if (!health.ok) {
-        console.error(red('Services not ready:'), health);
+        console.error(red('  Services not ready. Start docker, migrate, api, and worker first.'));
+        console.error(`  ${dim(JSON.stringify(health))}`);
         process.exit(1);
       }
+
       const result = await runScenario(scenarioId, runMode, adapter);
       printRun(result);
       const file = saveRun(result);
-      console.log(`\n${dim('Evidence saved →')} ${file}`);
+      console.log('');
+      console.log(rule('─'));
+      console.log(`  ${dim('evidence')}  ${file}`);
+      console.log('');
       await adapter.close();
       process.exit(result.executionStatus === 'failed' ? 1 : 0);
       break;
     }
 
     case 'verify': {
+      printLogo({ compact: true });
       const adapter = new SampleAppAdapter();
       const health = await adapter.health();
       if (!health.ok) {
-        console.error(red('Services not ready — start docker, migrate, api, and worker first.'));
-        console.error(health);
+        console.error(red('  Services not ready — start docker, migrate, api, and worker first.'));
+        console.error(`  ${dim(JSON.stringify(health))}`);
         process.exit(1);
       }
 
@@ -300,13 +378,13 @@ void (async () => {
       let failed = false;
       for (const s of SCENARIOS) {
         for (const m of s.supportedModes) {
-          console.log(`\n${dim('▶ verify')} ${s.id} [${modeLabel(m)}]`);
+          console.log(`\n  ${dim('▶')} ${s.id}  [${modeLabel(m)}]`);
           let result: RunResult;
           try {
             result = await runScenario(s.id, m, adapter);
           } catch (err) {
             failed = true;
-            console.error(red(`   ✗ threw: ${err}`));
+            console.error(red(`     threw: ${err}`));
             continue;
           }
           printRun(result);
@@ -315,31 +393,40 @@ void (async () => {
           const expected = expectedSafety(s.id, m);
           if (result.executionStatus !== 'completed' || result.safetyOutcome !== expected) {
             failed = true;
-            console.error(red(`   ✗ expected safetyOutcome=${expected}`));
+            console.error(red(`     expected safetyOutcome=${expected}`));
           }
         }
       }
 
-      console.log(`\n${bold('══════════════════════════════════════════════════════════════')}`);
-      console.log(`  ${bold('VERIFICATION MATRIX')}`);
-      console.log(`${bold('══════════════════════════════════════════════════════════════')}`);
+      printSection('VERIFICATION MATRIX', failed ? 'bad' : 'ok');
+      console.log(
+        `  ${dim('scenario'.padEnd(32))} ${dim('mode'.padEnd(12))} ${dim('outcome')}`,
+      );
+      console.log(dim('  ' + '─'.repeat(Math.min(termWidth() - 2, 56))));
       for (const r of results) {
         const outcome =
           r.safetyOutcome === 'invariant_held'
-            ? green('✓ held    ')
+            ? green('held')
             : r.safetyOutcome === 'invariant_violated'
-              ? red('✗ violated')
-              : yellow('? n/a     ');
+              ? red('violated')
+              : yellow('n/a');
         const modeCol = r.mode === 'fixed' ? green(r.mode.padEnd(12)) : red(r.mode.padEnd(12));
         console.log(`  ${r.scenario.padEnd(32)} ${modeCol} ${outcome}`);
       }
-      console.log(`${bold('══════════════════════════════════════════════════════════════')}\n`);
+      console.log('');
+      console.log(
+        failed
+          ? `  ${badge('bad', 'VERIFY FAILED')}`
+          : `  ${badge('ok', 'VERIFY PASSED — 10/10 cells matched')}`,
+      );
+      console.log('');
       await adapter.close();
       process.exit(failed ? 1 : 0);
       break;
     }
 
     case 'compare': {
+      printLogo({ compact: true });
       const files = readdirSync(EVIDENCE_DIR).filter((f) => f.endsWith('.json'));
       const runs = files
         .map((f) => JSON.parse(readFileSync(join(EVIDENCE_DIR, f), 'utf8')) as RunResult)
@@ -353,60 +440,50 @@ void (async () => {
         byScenario.set(r.scenario, slot);
       }
 
-      console.log(`\n${bold('Side-by-side comparison')} ${dim('(latest run per mode)')}\n`);
+      printSection('COMPARE  ·  latest per mode');
       for (const [id, pair] of byScenario) {
-        console.log(`  ${bold(id)}`);
+        console.log(`\n  ${bold(id)}`);
         console.log(
-          diffLine(
+          selectedLine(
             '-',
-            `vulnerable: ${pair.vulnerable?.safetyOutcome ?? '—'} — ${pair.vulnerable?.verdict ?? 'no run'}`,
+            `vulnerable  ${pair.vulnerable?.safetyOutcome ?? '—'}  ·  ${pair.vulnerable?.verdict ?? 'no run'}`,
           ),
         );
         console.log(
-          diffLine(
+          selectedLine(
             '+',
-            `fixed     : ${pair.fixed?.safetyOutcome ?? '—'} — ${pair.fixed?.verdict ?? 'no run'}`,
+            `fixed       ${pair.fixed?.safetyOutcome ?? '—'}  ·  ${pair.fixed?.verdict ?? 'no run'}`,
           ),
         );
-        console.log('');
       }
+      console.log('');
       break;
     }
 
     case 'report': {
       const runId = positional[0];
       if (!runId) {
+        printLogo({ compact: true });
         try {
           const files = readdirSync(EVIDENCE_DIR).filter((f) => f.endsWith('.json'));
-          console.log(`\n${dim('Saved runs in')} ${EVIDENCE_DIR}:\n`);
-          for (const f of files) console.log(`  ${f}`);
+          console.log(`\n  ${bold('SAVED RUNS')}  ${dim(EVIDENCE_DIR)}\n`);
+          for (const f of files) console.log(`  ${brand('▸')} ${f}`);
+          console.log('');
         } catch {
-          console.log('No evidence runs found. Run a scenario first.');
+          console.log(yellow('\n  No evidence runs found. Run a scenario first.\n'));
         }
         break;
       }
+      printLogo({ compact: true });
       const file = join(EVIDENCE_DIR, `${runId}.json`);
       const result = JSON.parse(readFileSync(file, 'utf8')) as RunResult;
       printRun(result);
+      console.log('');
       break;
     }
 
     default: {
-      console.log(`
-${bold('DeleteProof CLI')}
-
-  npm run dp -- list
-  npm run dp -- run --scenario <id> --mode <vulnerable|fixed>
-  npm run dp -- verify
-  npm run dp -- compare
-  npm run dp -- report [runId]
-
-${dim('Tip: run inside Windows Terminal / VS Code for full red/green colors.')}
-`);
+      printHelp();
     }
   }
 })();
-
-function cyanId(s: string): string {
-  return `${c.cyan}${s}${c.reset}`;
-}
