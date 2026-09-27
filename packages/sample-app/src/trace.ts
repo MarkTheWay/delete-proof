@@ -2,7 +2,7 @@
  * Redis stream trace — active only when DELETEPROOF_TEST_HOOKS=1.
  * XADD to dp:{runId}:trace
  */
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import type { TraceEvent, TraceEventKind } from '@delete-proof/shared';
 import { redisUrl, testHooksEnabled } from './config.js';
 

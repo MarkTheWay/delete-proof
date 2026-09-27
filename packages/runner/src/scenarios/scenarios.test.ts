@@ -73,7 +73,7 @@ describe('active-customer-update', () => {
     expect(result.executionStatus).toBe('completed');
     expect(result.safetyOutcome).toBe('invariant_held');
     expect(result.finalCustomerState).not.toBeNull();
-    expect((result.finalCustomerState as { profile: { plan: string } }).profile.plan).toBe('pro');
+    expect(result.finalCustomerState?.profile.plan).toBe('pro');
   });
 });
 
@@ -83,8 +83,6 @@ describe('unrelated-customer-update', () => {
     expect(result.executionStatus).toBe('completed');
     expect(result.safetyOutcome).toBe('invariant_held');
     expect(result.finalCustomerState).not.toBeNull();
-    expect(
-      (result.finalCustomerState as { profile: { feature: string } }).profile.feature,
-    ).toBe('unrelated-update');
+    expect(result.finalCustomerState?.profile.feature).toBe('unrelated-update');
   });
 });

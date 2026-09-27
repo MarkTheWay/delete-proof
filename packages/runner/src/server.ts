@@ -57,7 +57,7 @@ app.get('/runs', async () => {
           return null;
         }
       })
-      .filter(Boolean)
+      .filter((r): r is RunResult => r !== null)
       .sort((a: RunResult, b: RunResult) => b.startedAt.localeCompare(a.startedAt));
   } catch {
     return [];

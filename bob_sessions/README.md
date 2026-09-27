@@ -1,35 +1,40 @@
-# Bob Session Screenshots
+# IBM Bob session reports
 
-This directory holds **genuine** IBM Bob task-session summary screenshots from each
-teammate who used Bob during the hackathon.
+Required for judging: every team member exports **every** Bob IDE task used for
+this project. Each task needs two files:
 
-## How to add your screenshot
+1. The exported task history (markdown).
+2. A screenshot of the task session consumption summary.
 
-1. Complete your work session in IBM Bob IDE.
-2. At the end of the session, Bob displays a session summary — screenshot the full
-   summary panel (task list, tool-use counts, and completion status).
-3. Save the image as `<your-github-handle>-session-<YYYY-MM-DD>.png`
-   in this directory.
-4. Commit and push.
+## How to export (from the hackathon guide)
 
-## Format requirements
+1. In Bob IDE chat, open **Views and More Actions → History**.
+2. Confirm the workspace is this project (choose **All** if tasks span workspaces).
+3. Open the task and select the task header to show the consumption summary.
+4. Screenshot the consumption summary.
+5. In the same view, click **Export task history** to download the markdown.
+6. Repeat for each task.
 
-- **One file per session.** Multiple sessions from the same teammate are welcome.
-- Screenshot must show the genuine Bob session panel — no cropping of the task list.
-- Do not add fabricated screenshots, AI-generated images, or screenshots of this
-  README.
+Make sure you are on the hackathon account (`ibm-coding-challenge-xxx`), not a
+personal Bob account.
 
-## Examples of valid content
+## Before committing
 
-- Bob's task progress panel showing the scenario implementation tasks.
-- Tool-use summary (file reads, code edits, terminal commands).
-- Completion confirmation for a milestone (CLI, repair, dashboard, tests).
+Search every export for credentials, API keys, tokens, and `.env` contents and
+remove them. IBM deactivates accounts when credentials appear in a public repo.
 
-## Current screenshots
+## Naming
 
-_(None yet — add yours after your first Bob session.)_
+```
+bob_sessions/
+  <github-handle>-01-<topic>.md
+  <github-handle>-01-<topic>.png
+  <github-handle>-02-<topic>.md
+  <github-handle>-02-<topic>.png
+```
 
----
+## Sessions
 
-*These screenshots are submitted as evidence of authentic Bob IDE usage for the
-IBM Bob Hackathon evaluation.*
+| # | Member | Task | Files |
+|---|---|---|---|
+| 01 | MarkTheWay | Task `ffe658448386cf1939242dd67dfb387f` — build the DeleteProof prototype from the project brief (162 commands, 44 file writes, 12 diffs; 45.88 Bobcoins) | [task history](marktheway-01-deleteproof-build-task-history.md) · [consumption summary](marktheway-01-deleteproof-build-consumption-summary.png) · in progress: [a](marktheway-01-deleteproof-build-in-progress-a.png), [b](marktheway-01-deleteproof-build-in-progress-b.png) |

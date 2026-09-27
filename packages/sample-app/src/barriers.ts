@@ -10,7 +10,7 @@
  * client would serialize concurrent workers because BLPOP occupies the
  * connection until it returns.
  */
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { barrierTimeoutMs, redisUrl, testHooksEnabled } from './config.js';
 import { emitTrace } from './trace.js';
 

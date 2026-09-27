@@ -531,7 +531,7 @@ export default function App() {
       </div>
 
       <footer style={{ marginTop: 48, paddingTop: 16, borderTop: '1px solid var(--border)', textAlign: 'center', color: 'var(--muted)', fontSize: 11 }}>
-        DeleteProof · IBM Bob Hackathon 2024 · Evidence-backed distributed-systems bug demo
+        DeleteProof · IBM Bob 2.0 Hackathon 2026 · Evidence-backed distributed-systems bug demo
       </footer>
     </div>
   );
