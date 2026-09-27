@@ -55,6 +55,13 @@ hand-building a race harness.
 server in Bob IDE. Bob gets these tools: `list_scenarios`, `run_scenario`,
 `get_run_trace`, `compare_runs`, `list_runs`, `export_report`.
 
+In [Bob task 02](bob_sessions/marktheway-02-mcp-demo-task-history.md) Bob used
+those tools to reproduce the resurrection in vulnerable mode, run the fixed
+mode, pull both traces, and explain from `vulnerable.ts` / `fixed.ts` why the
+worker's `lock_wait_observed` → `worker_blocked_by_tombstone` sequence keeps the
+customer absent. Bob also hit an MCP protocol bug (`list_scenarios` returned an
+array as `structuredContent`); we fixed it and Bob re-verified the call.
+
 **In development.** Bob built the first end-to-end version of DeleteProof from
 our project brief in one task (162 commands, 44 file writes, 12 diffs):
 

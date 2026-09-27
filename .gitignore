@@ -18,15 +18,9 @@ Thumbs.db
 # Bob agent skills (global, not project-specific)
 .agents/
 skills-lock.json
-<<<<<<< HEAD
 output
-=======
 # Private recording notes (not part of the submission)
 VIDEO_SCRIPT.md
 *.tsbuildinfo
 packages/dashboard/vite.config.js
 packages/dashboard/vite.config.d.ts
-*.tsbuildinfo
-packages/dashboard/vite.config.js
-packages/dashboard/vite.config.d.ts
->>>>>>> b6e6ee49af089ec7fadf17e80aef709f0f9b2499

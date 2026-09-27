@@ -104,7 +104,7 @@ async function callTool(
 ): Promise<unknown> {
   switch (name) {
     case 'list_scenarios':
-      return SCENARIOS;
+      return { scenarios: SCENARIOS };
 
     case 'run_scenario': {
       const scenario = String(args.scenario ?? '');
@@ -166,11 +166,12 @@ async function callTool(
 
     case 'list_runs': {
       try {
-        return readdirSync(EVIDENCE_DIR)
+        const runs = readdirSync(EVIDENCE_DIR)
           .filter((f) => f.endsWith('.json'))
           .map((f) => f.replace(/\.json$/, ''));
+        return { runs };
       } catch {
-        return [];
+        return { runs: [] };
       }
     }
 
