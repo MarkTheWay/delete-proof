@@ -196,15 +196,17 @@ npm run dp -- report [runId]
 
 ## Verification status
 
-**Verified** (2026-09-26) against **Docker Compose** (`postgres:17-alpine` + `redis:7-alpine`)
-with a live sample-app API + BullMQ worker + runner HTTP API:
+**Verified** against **Docker Compose** (`postgres:17-alpine` + `redis:7-alpine`, 2026-09-26)
+and the embedded `npm run services:up` path (2026-09-27), each with a live
+sample-app API + BullMQ worker:
 
 | Check | Result |
 |---|---|
-| `docker compose up -d` | healthy |
+| `npm run typecheck` | clean (shared, sample-app, runner, mcp) |
+| `npm run build` | dashboard builds |
 | `npm run dp -- verify` | exit 0 — full 10-cell matrix matched expected outcomes |
 | `npm test` | Vitest 6/6 passed |
-| `npm run e2e` | Playwright scenario 1 (vulnerable + fixed) passed |
+| `npm run e2e` | Playwright scenario 1 (vulnerable + fixed) passed (2026-09-26) |
 
 Vulnerable resurrection verdict observed exactly:
 

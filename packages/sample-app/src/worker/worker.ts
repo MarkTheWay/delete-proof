@@ -2,7 +2,7 @@
  * BullMQ worker — processes profile-sync jobs in vulnerable or fixed mode.
  */
 import { Worker } from 'bullmq';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { loadEnv, QUEUE_NAME, redisUrl, testHooksEnabled } from '../config.js';
 import { getPool } from '../db/pool.js';
 import { processSyncVulnerable } from '../modes/vulnerable.js';

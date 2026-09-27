@@ -2,7 +2,7 @@
  * Runner-side Redis barrier control.
  * Does NOT hold DB locks — only coordinates via Redis lists.
  */
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { barrierTimeoutMs, redisUrl } from './env.js';
 
 let _redis: Redis | null = null;

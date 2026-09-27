@@ -17,7 +17,8 @@
     "services:down": "tsx scripts/services-down.ts",
     "test": "npm run test -w @delete-proof/runner",
     "e2e": "npm run e2e -w @delete-proof/runner",
-    "build": "npm run build --workspaces --if-present"
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --noEmit -p packages/shared && tsc --noEmit -p packages/sample-app && tsc --noEmit -p packages/runner && tsc --noEmit -p packages/mcp"
   },
   "devDependencies": {
     "embedded-postgres": "^17.10.0-beta.17",
