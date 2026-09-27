@@ -55,9 +55,12 @@ hand-building a race harness.
 server in Bob IDE. Bob gets these tools: `list_scenarios`, `run_scenario`,
 `get_run_trace`, `compare_runs`, `list_runs`, `export_report`.
 
-**In development.** _Team: describe the real Bob tasks here (what Bob was asked,
-which files it changed) and link each exported report in `bob_sessions/`. Only
-list work Bob actually did._
+**In development.** Bob scaffolded the project: `git init`, the npm-workspaces
+monorepo layout, root `package.json` scripts, and the initial package files (38
+files changed in that task). In the same task Bob diagnosed why Vite failed to
+install on Windows (Rollup's native binary `@rollup/rollup-win32-x64-msvc` was
+missing because of an npm version bug) and worked through fixes. Evidence:
+[`bob_sessions/`](bob_sessions/).
 
 ## Architecture
 

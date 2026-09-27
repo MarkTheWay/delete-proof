@@ -37,4 +37,4 @@ bob_sessions/
 
 | # | Member | Task | Files |
 |---|---|---|---|
-| | | | |
+| 01 | MarkTheWay | "git init, npm workspaces with p…" — scaffolded the npm-workspaces monorepo (38 files changed) and diagnosed the Windows Vite/Rollup native-binary install failure | [`marktheway-01-monorepo-scaffold-a.png`](marktheway-01-monorepo-scaffold-a.png), [`marktheway-01-monorepo-scaffold-b.png`](marktheway-01-monorepo-scaffold-b.png) · task history export: _pending_ |
