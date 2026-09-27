@@ -1,6 +1,6 @@
 # DeleteProof
 
-**IBM Bob Hackathon**
+**IBM Bob 2.0 Hackathon** · Theme: *Turn idea into impact faster*
 
 Reproduce and repair a distributed-systems ghost-write bug: a deleted customer
 is recreated by a stale asynchronous event. DeleteProof proves the failure,
@@ -9,6 +9,12 @@ explains its cause, and demonstrates a transactional repair.
 ```
 REPRODUCE → EXPLAIN → REPAIR → VERIFY
 ```
+
+| | |
+|---|---|
+| Demo video | _add link_ |
+| Bob session reports | [`bob_sessions/`](bob_sessions/) |
+| Bob integration | [`.bob/mcp.json`](.bob/mcp.json) → `packages/mcp` |
 
 ---
 
@@ -20,6 +26,38 @@ row — violating the invariant:
 
 > **After deletion commits, asynchronous processing must not recreate
 > that customer.**
+
+This is a GDPR right-to-erasure failure that unit tests almost never catch: it
+only appears under one specific interleaving of an API transaction and a queue
+worker, so it ships to production and surfaces as "deleted users coming back".
+
+## The Solution
+
+DeleteProof forces that interleaving deterministically (Redis barriers, no
+sleeps), records evidence from the real database, and verifies a repair:
+
+1. **Reproduce** — run the race against real PostgreSQL 17 + Redis 7 and watch the deleted row reappear.
+2. **Explain** — a merged trace shows exactly which transaction wrote after the delete committed.
+3. **Repair** — `customer_tombstones` + `pg_advisory_xact_lock(customer_lock_key(id))`.
+4. **Verify** — five scenarios × two modes; the fix must block stale writes *and* keep legitimate updates working.
+
+## Theme fit: turn idea into impact faster
+
+Concurrency bugs normally take days to reproduce and are "fixed" on intuition.
+DeleteProof turns that into a single command with a pass/fail verdict, and
+exposes the same scenarios to IBM Bob over MCP so Bob can reproduce, inspect
+traces, and confirm a repair from inside the IDE instead of the developer
+hand-building a race harness.
+
+## How IBM Bob is used
+
+**In the product.** `.bob/mcp.json` registers `packages/mcp` as a stdio MCP
+server in Bob IDE. Bob gets these tools: `list_scenarios`, `run_scenario`,
+`get_run_trace`, `compare_runs`, `list_runs`, `export_report`.
+
+**In development.** _Team: describe the real Bob tasks here (what Bob was asked,
+which files it changed) and link each exported report in `bob_sessions/`. Only
+list work Bob actually did._
 
 ## Architecture
 
@@ -181,7 +219,11 @@ Fallback without Docker: `npm run services:up` (embedded-postgres + redis-memory
 - Tombstones are outside any complete data-erasure guarantee.
 - No authentication, multi-tenancy, or production hardening.
 
+## Bob session reports
+
+Exported IBM Bob IDE task histories and their consumption-summary screenshots
+are in [`bob_sessions/`](bob_sessions/), as required for judging.
+
 ## License
 
-See [LICENSE](LICENSE). If no license has been selected, this is a handoff
-decision — choose an appropriate open-source license before publication.
+MIT — see [LICENSE](LICENSE).
