@@ -37,4 +37,4 @@ bob_sessions/
 
 | # | Member | Task | Files |
 |---|---|---|---|
-| 01 | MarkTheWay | "git init, npm workspaces with p…" — scaffolded the npm-workspaces monorepo (38 files changed) and diagnosed the Windows Vite/Rollup native-binary install failure | [`marktheway-01-monorepo-scaffold-a.png`](marktheway-01-monorepo-scaffold-a.png), [`marktheway-01-monorepo-scaffold-b.png`](marktheway-01-monorepo-scaffold-b.png) · task history export: _pending_ |
+| 01 | MarkTheWay | Task `ffe658448386cf1939242dd67dfb387f` — build the DeleteProof prototype from the project brief (162 commands, 44 file writes, 12 diffs; 45.88 Bobcoins) | [task history](marktheway-01-deleteproof-build-task-history.md) · [consumption summary](marktheway-01-deleteproof-build-consumption-summary.png) · in progress: [a](marktheway-01-deleteproof-build-in-progress-a.png), [b](marktheway-01-deleteproof-build-in-progress-b.png) |

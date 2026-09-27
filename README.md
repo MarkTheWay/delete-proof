@@ -55,12 +55,22 @@ hand-building a race harness.
 server in Bob IDE. Bob gets these tools: `list_scenarios`, `run_scenario`,
 `get_run_trace`, `compare_runs`, `list_runs`, `export_report`.
 
-**In development.** Bob scaffolded the project: `git init`, the npm-workspaces
-monorepo layout, root `package.json` scripts, and the initial package files (38
-files changed in that task). In the same task Bob diagnosed why Vite failed to
-install on Windows (Rollup's native binary `@rollup/rollup-win32-x64-msvc` was
-missing because of an npm version bug) and worked through fixes. Evidence:
-[`bob_sessions/`](bob_sessions/).
+**In development.** Bob built the first end-to-end version of DeleteProof from
+our project brief in one task (162 commands, 44 file writes, 12 diffs):
+
+- npm-workspaces monorepo, pinned dependencies, `docker-compose.yml`, `.env.example`
+- sample app: schema with `customer_tombstones` and `customer_lock_key`, Fastify API,
+  BullMQ worker, Redis barriers + trace stream, the vulnerable fixture
+- the repair: `READ COMMITTED` + `pg_advisory_xact_lock` + tombstone check
+- runner: `TargetAdapter`, evidence model, all five scenarios, `dp` CLI, Vitest suite
+- runner HTTP API, React/Vite dashboard, the stdio MCP adapter registered in `.bob/mcp.json`
+- README, demo script, submission draft
+
+Bob could not run the scenarios against live services because Docker was not
+installed on that machine, and the task stopped when the trial Bobcoins ran
+out. The team then ran everything against real PostgreSQL and Redis, made the
+concurrency scenarios deterministic, tightened assertions, and polished the CLI.
+Full transcript: [`bob_sessions/`](bob_sessions/).
 
 ## Architecture
 
