@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeleteProof — Deleted customers should stay deleted</title>
+  <meta name="description" content="DeleteProof reproduces a race where a stale queued job recreates a deleted customer, then proves a fix using advisory locks and tombstones, verified on real PostgreSQL and Redis." />
+  <meta property="og:title" content="DeleteProof — Reproduce. Explain. Repair. Verify." />
+  <meta property="og:description" content="Catch ghost-writes: stale background jobs that bring deleted customers back. Reproduce the bug on demand and prove a transactional fix." />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#0a0c10" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0c10'/%3E%3Ctext x='6' y='23' font-family='monospace' font-size='18' font-weight='700' fill='%23f85149'%3E-%3C/text%3E%3Ctext x='17' y='23' font-family='monospace' font-size='18' font-weight='700' fill='%233fb950'%3E+%3C/text%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --bg-2: #0f1218;
+      --panel: #11151c;
+      --border: #222a35;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --red: #f85149;
+      --red-bg: rgba(248, 81, 73, 0.1);
+      --green: #3fb950;
+      --green-bg: rgba(63, 185, 80, 0.1);
+      --blue: #58a6ff;
+      --mono: ui-monospace, "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    code, pre { font-family: var(--mono); }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+    /* Nav */
+    nav {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(10, 12, 16, 0.8);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { font-family: var(--mono); font-weight: 700; font-size: 18px; letter-spacing: -0.02em; }
+    .logo .m { color: var(--red); }
+    .logo .p { color: var(--green); }
+    .nav-links { display: flex; gap: 28px; align-items: center; font-size: 14px; color: var(--muted); }
+    .nav-links a:hover { color: var(--text); }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 12px 20px; border-radius: 10px;
+      font-weight: 600; font-size: 15px;
+      border: 1px solid var(--border);
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .btn:hover { transform: translateY(-1px); border-color: #3a4350; }
+    .btn-primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+    .btn-primary:hover { background: #fff; border-color: #fff; }
+    .btn-sm { padding: 8px 14px; font-size: 14px; }
+    .btn svg { width: 18px; height: 18px; }
+
+    /* Hero */
+    .hero { padding: 96px 0 72px; position: relative; overflow: hidden; }
+    .hero::before {
+      content: ""; position: absolute; inset: -40% -10% auto -10%; height: 700px;
+      background:
+        radial-gradient(closest-side at 30% 50%, rgba(248, 81, 73, 0.12), transparent),
+        radial-gradient(closest-side at 70% 50%, rgba(63, 185, 80, 0.10), transparent);
+      pointer-events: none;
+    }
+    .hero .wrap { position: relative; display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; align-items: center; }
+    .eyebrow {
+      display: inline-flex; gap: 8px; align-items: center;
+      font-family: var(--mono); font-size: 13px; color: var(--muted);
+      padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; margin-bottom: 24px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 12px var(--red); animation: pulse 2s infinite; }
+    @keyframes pulse { 50% { opacity: 0.35; } }
+    h1 { font-size: clamp(38px, 5.2vw, 60px); line-height: 1.05; letter-spacing: -0.035em; font-weight: 800; }
+    h1 .ghost { color: var(--red); }
+    .lede { margin-top: 22px; font-size: 19px; color: var(--muted); max-width: 540px; }
+    .cta { display: flex; gap: 14px; margin-top: 34px; flex-wrap: wrap; }
+    .pipeline { margin-top: 36px; font-family: var(--mono); font-size: 13px; color: var(--muted); letter-spacing: 0.06em; }
+    .pipeline b { color: var(--text); font-weight: 600; }
+
+    /* Terminal */
+    .term {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5); overflow: hidden;
+    }
+    .term-bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-2); }
+    .term-bar i { width: 11px; height: 11px; border-radius: 50%; background: #2d333b; }
+    .tabs { margin-left: 14px; display: flex; gap: 4px; }
+    .tab {
+      font-family: var(--mono); font-size: 12px; padding: 5px 10px; border-radius: 6px;
+      color: var(--muted); background: transparent; border: 1px solid transparent; cursor: pointer;
+    }
+    .tab.active[data-mode="vulnerable"] { color: var(--red); border-color: rgba(248, 81, 73, 0.35); background: var(--red-bg); }
+    .tab.active[data-mode="fixed"] { color: var(--green); border-color: rgba(63, 185, 80, 0.35); background: var(--green-bg); }
+    .term-body { padding: 18px 18px 20px; font-family: var(--mono); font-size: 12.5px; line-height: 1.75; height: 350px; white-space: pre; overflow: hidden; }
+    .l-cmd { color: var(--text); }
+    .l-cmd::before { content: "$ "; color: var(--muted); }
+    .l-cmd-cont { color: var(--text); }
+    .l-dim { color: var(--muted); }
+    .l-red { color: var(--red); }
+    .l-green { color: var(--green); }
+    .l-add { background: var(--green-bg); color: var(--green); display: block; margin: 0 -18px; padding: 0 18px; }
+    .l-del { background: var(--red-bg); color: var(--red); display: block; margin: 0 -18px; padding: 0 18px; }
+    .l-verdict-bad { color: var(--red); font-weight: 700; }
+    .l-verdict-ok { color: var(--green); font-weight: 700; }
+    .caret { display: inline-block; width: 8px; height: 15px; background: var(--text); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* Sections */
+    section { padding: 96px 0; border-top: 1px solid var(--border); }
+    .kicker { font-family: var(--mono); font-size: 13px; color: var(--blue); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 14px; }
+    h2 { font-size: clamp(30px, 3.6vw, 42px); letter-spacing: -0.03em; line-height: 1.15; font-weight: 750; max-width: 760px; }
+    .sub { margin-top: 16px; color: var(--muted); font-size: 18px; max-width: 700px; }
+
+    .invariant {
+      margin-top: 40px; padding: 26px 30px; border-radius: 14px;
+      border: 1px solid var(--border); border-left: 3px solid var(--green);
+      background: linear-gradient(90deg, var(--green-bg), transparent 60%);
+      font-size: 20px; font-weight: 600; max-width: 820px;
+    }
+    .invariant span { display: block; font-family: var(--mono); font-size: 12px; color: var(--green); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; font-weight: 500; }
+
+    .timeline { margin-top: 44px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .tl {
+      padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel);
+      position: relative;
+    }
+    .tl .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .tl h4 { margin: 8px 0 6px; font-size: 16px; }
+    .tl p { color: var(--muted); font-size: 14px; }
+    .tl.bad { border-color: rgba(248, 81, 73, 0.4); background: linear-gradient(180deg, var(--red-bg), var(--panel)); }
+    .tl.bad h4 { color: var(--red); }
+
+    .grid4 { margin-top: 48px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .card { padding: 26px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
+    .card .step { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .card h3 { font-size: 20px; margin: 10px 0 8px; letter-spacing: -0.01em; }
+    .card p { color: var(--muted); font-size: 15px; }
+    .card code { font-size: 12.5px; color: var(--text); background: #1a2029; padding: 2px 6px; border-radius: 5px; }
+
+    .split { margin-top: 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .code {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+    }
+    .code-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .tag { padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; }
+    .tag.bad { color: var(--red); background: var(--red-bg); }
+    .tag.ok { color: var(--green); background: var(--green-bg); }
+    .code pre { padding: 18px; font-size: 13px; line-height: 1.7; overflow-x: auto; color: #c9d1d9; }
+    .kw { color: #ff7b72; }
+    .fn { color: #d2a8ff; }
+    .cm { color: var(--muted); }
+    .hl-add { background: var(--green-bg); display: block; margin: 0 -18px; padding: 0 18px; box-shadow: inset 3px 0 0 var(--green); }
+    .hl-del { background: var(--red-bg); display: block; margin: 0 -18px; padding: 0 18px; box-shadow: inset 3px 0 0 var(--red); }
+
+    table { margin-top: 44px; width: 100%; border-collapse: collapse; font-size: 15px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+    th, td { text-align: left; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+    th { font-family: var(--mono); font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; background: var(--bg-2); }
+    td code { font-size: 13.5px; }
+    tr:last-child td { border-bottom: 0; }
+    .bad-t { color: var(--red); font-weight: 600; }
+    .ok-t { color: var(--green); font-weight: 600; }
+    .note { margin-top: 14px; color: var(--muted); font-size: 14px; font-family: var(--mono); }
+
+    .tools { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 10px; }
+    .tools code { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-size: 13.5px; }
+    .bob-stats { margin-top: 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; max-width: 720px; }
+    .stat { padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+    .stat b { display: block; font-size: 32px; letter-spacing: -0.03em; }
+    .stat span { color: var(--muted); font-size: 14px; }
+
+    .quick pre {
+      margin-top: 40px; padding: 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+      font-size: 14px; line-height: 1.85; overflow-x: auto; color: #c9d1d9;
+    }
+
+    .final { text-align: center; padding: 120px 0; }
+    .final h2 { margin: 0 auto; }
+    .final .sub { margin: 16px auto 0; }
+    .final .cta { justify-content: center; }
+    .diff-title { font-family: var(--mono); font-size: 18px; margin-bottom: 26px; line-height: 1.8; }
+
+    footer { border-top: 1px solid var(--border); padding: 32px 0; color: var(--muted); font-size: 14px; }
+    footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    footer a:hover { color: var(--text); }
+
+    @media (max-width: 920px) {
+      .hero .wrap, .split { grid-template-columns: 1fr; }
+      .grid4, .timeline { grid-template-columns: 1fr 1fr; }
+      .nav-links a:not(.btn) { display: none; }
+      .hero { padding-top: 64px; }
+    }
+    @media (max-width: 560px) {
+      .grid4, .timeline, .bob-stats { grid-template-columns: 1fr; }
+      th:nth-child(1), td:nth-child(1) { padding-right: 8px; }
+      th, td { padding: 12px 12px; font-size: 13px; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="wrap">
+      <a class="logo" href="#"><span class="m">−</span><span class="p">+</span> DeleteProof</a>
+      <div class="nav-links">
+        <a href="#problem">Problem</a>
+        <a href="#how">How it works</a>
+        <a href="#fix">The fix</a>
+        <a href="#bob">IBM Bob</a>
+        <a class="btn btn-sm" href="https://github.com/MarkTheWay/delete-proof" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="wrap">
+      <div>
+        <div class="eyebrow"><span class="dot"></span> IBM Bob 2.0 Hackathon</div>
+        <h1>Deleted customers<br />should stay <span class="ghost">deleted.</span></h1>
+        <p class="lede">
+          A stale background job can quietly bring a deleted customer back, with no error and no alert.
+          DeleteProof reproduces that race on demand, shows exactly why it happens, and proves the fix.
+        </p>
+        <div class="cta">
+          <a class="btn btn-primary" href="https://github.com/MarkTheWay/delete-proof" target="_blank" rel="noopener">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            View the repository
+          </a>
+          <a class="btn" href="#how">How it works →</a>
+        </div>
+        <p class="pipeline"><b>REPRODUCE</b> → <b>EXPLAIN</b> → <b>REPAIR</b> → <b>VERIFY</b></p>
+      </div>
+
+      <div class="term" aria-label="DeleteProof CLI output">
+        <div class="term-bar">
+          <i></i><i></i><i></i>
+          <div class="tabs">
+            <button class="tab active" data-mode="vulnerable">--mode vulnerable</button>
+            <button class="tab" data-mode="fixed">--mode fixed</button>
+          </div>
+        </div>
+        <div class="term-body" id="term"></div>
+      </div>
+    </div>
+  </header>
+
+  <section id="problem">
+    <div class="wrap">
+      <p class="kicker">The problem</p>
+      <h2>A ghost-write: the bug most teams find in production.</h2>
+      <p class="sub">
+        A sync job is queued, then the customer is deleted. When the job finally runs, its upsert sees no row,
+        so it inserts one. The deleted customer is back, and every tool says everything is fine.
+      </p>
+      <div class="timeline">
+        <div class="tl"><p class="n">t0</p><h4>Customer exists</h4><p>An active row in <code>customers</code>.</p></div>
+        <div class="tl"><p class="n">t1</p><h4>Sync job queued</h4><p>A BullMQ job carries a stale profile update.</p></div>
+        <div class="tl"><p class="n">t2</p><h4>Deletion commits</h4><p>The API deletes the row. Right-to-erasure honored… for now.</p></div>
+        <div class="tl bad"><p class="n">t3</p><h4>Customer is back</h4><p>The worker's upsert inserts a fresh row from the stale payload.</p></div>
+      </div>
+      <div class="invariant">
+        <span>The invariant we protect</span>
+        Once a deletion commits, no background job may recreate that customer.
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <p class="kicker">How it works</p>
+      <h2>From "it happens sometimes" to a pass/fail verdict in one command.</h2>
+      <p class="sub">Real PostgreSQL 17, real Redis 7, a real Fastify API and BullMQ worker. No mocks, no sleep timers.</p>
+      <div class="grid4">
+        <div class="card">
+          <p class="step">01</p><h3>Reproduce</h3>
+          <p>Redis barriers (<code>LPUSH</code>/<code>BLPOP</code>) pause each process at the exact point needed, so the race happens every run.</p>
+        </div>
+        <div class="card">
+          <p class="step">02</p><h3>Explain</h3>
+          <p>A merged trace from the API and worker shows which transaction wrote after the delete committed.</p>
+        </div>
+        <div class="card">
+          <p class="step">03</p><h3>Repair</h3>
+          <p>A tombstone plus a per-customer advisory lock, so a delete and a stale write can never overlap.</p>
+        </div>
+        <div class="card">
+          <p class="step">04</p><h3>Verify</h3>
+          <p>Five scenarios in both modes. The fix must block stale writes <em>and</em> keep real updates working.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="fix">
+    <div class="wrap">
+      <p class="kicker">The fix</p>
+      <h2>Two changes, one transaction.</h2>
+      <p class="sub">
+        Why not just check whether the customer exists first? Because the delete can commit between the check and the write.
+        The lock closes that gap; the tombstone remembers the deletion.
+      </p>
+      <div class="split">
+        <div class="code">
+          <div class="code-head"><span>worker · vulnerable.ts</span><span class="tag bad">RESURRECTS</span></div>
+<pre><span class="kw">INSERT INTO</span> customers (id, email, name, profile)
+<span class="kw">VALUES</span> ($1, $2, $3, $4)
+<span class="hl-del"><span class="kw">ON CONFLICT</span> (id) <span class="kw">DO UPDATE</span></span>  <span class="kw">SET</span> profile = customers.profile
+              || EXCLUDED.profile;
+
+<span class="cm">-- Row was deleted, so there is no conflict.</span>
+<span class="cm">-- The INSERT branch runs and the customer returns.</span></pre>
+        </div>
+        <div class="code">
+          <div class="code-head"><span>worker · fixed.ts</span><span class="tag ok">INVARIANT HELD</span></div>
+<pre><span class="kw">BEGIN ISOLATION LEVEL READ COMMITTED</span>;
+<span class="hl-add"><span class="kw">SELECT</span> <span class="fn">pg_advisory_xact_lock</span>(<span class="fn">customer_lock_key</span>(id));</span><span class="hl-add"><span class="kw">SELECT</span> 1 <span class="kw">FROM</span> customer_tombstones
+ <span class="kw">WHERE</span> customer_id = id;</span>
+<span class="cm">-- found → COMMIT, write skipped</span>
+<span class="cm">-- not found → upsert → COMMIT</span>
+<span class="kw">COMMIT</span>;</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="scenarios">
+    <div class="wrap">
+      <p class="kicker">Verification</p>
+      <h2>Ten checks. Every one matches.</h2>
+      <p class="sub"><code>npm run dp -- verify</code> runs every scenario in both modes against live services and exits non-zero on any mismatch.</p>
+      <table>
+        <thead><tr><th>Scenario</th><th>Vulnerable</th><th>Fixed</th></tr></thead>
+        <tbody>
+          <tr><td><code>delayed-update-after-delete</code></td><td class="bad-t">✕ resurrects</td><td class="ok-t">✓ absent</td></tr>
+          <tr><td><code>duplicate-stale-delivery</code></td><td class="bad-t">✕ resurrects</td><td class="ok-t">✓ absent</td></tr>
+          <tr><td><code>concurrent-delete-update</code></td><td class="bad-t">✕ resurrects</td><td class="ok-t">✓ absent (both orderings)</td></tr>
+          <tr><td><code>active-customer-update</code></td><td class="ok-t">✓ updates</td><td class="ok-t">✓ updates</td></tr>
+          <tr><td><code>unrelated-customer-update</code></td><td class="ok-t">✓ unaffected</td><td class="ok-t">✓ unaffected</td></tr>
+        </tbody>
+      </table>
+      <p class="note">Also: Vitest 6/6 · Playwright end-to-end · lock waits confirmed via pg_stat_activity</p>
+    </div>
+  </section>
+
+  <section id="bob">
+    <div class="wrap">
+      <p class="kicker">Built with IBM Bob</p>
+      <h2>Bob built it, and Bob can drive it.</h2>
+      <p class="sub">
+        IBM Bob built the first end-to-end version from our project brief in a single task. DeleteProof also ships an MCP server
+        registered in <code>.bob/mcp.json</code>, so Bob can run scenarios and read traces from inside the IDE.
+      </p>
+      <div class="bob-stats">
+        <div class="stat"><b>162</b><span>commands run by Bob</span></div>
+        <div class="stat"><b>44</b><span>files written</span></div>
+        <div class="stat"><b>6</b><span>MCP tools exposed</span></div>
+      </div>
+      <div class="tools">
+        <code>list_scenarios</code><code>run_scenario</code><code>get_run_trace</code>
+        <code>compare_runs</code><code>list_runs</code><code>export_report</code>
+      </div>
+    </div>
+  </section>
+
+  <section class="quick" id="quickstart">
+    <div class="wrap">
+      <p class="kicker">Quick start</p>
+      <h2>Break it yourself in under a minute.</h2>
+<pre><span class="cm"># infrastructure (or: npm run services:up — no Docker needed)</span>
+docker compose up -d
+npm install &amp;&amp; npm run migrate
+
+<span class="cm"># one API + one worker</span>
+npm run start:api
+npm run start:worker
+
+<span class="cm"># watch the ghost-write, then the fix</span>
+npm run dp -- run --scenario delayed-update-after-delete --mode vulnerable
+npm run dp -- run --scenario delayed-update-after-delete --mode fixed</pre>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <div class="diff-title"><span class="l-red">− "it only happens sometimes"</span><br /><span class="l-green">+ a reproducible, verified fix</span></div>
+      <h2>Stop finding ghost-writes in production.</h2>
+      <p class="sub">Open source, MIT licensed. Clone it, run it, break it.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/MarkTheWay/delete-proof" target="_blank" rel="noopener">View on GitHub →</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <span><span class="logo" style="font-size:14px"><span class="m">−</span><span class="p">+</span> DeleteProof</span> · IBM Bob 2.0 Hackathon</span>
+      <a href="https://github.com/MarkTheWay/delete-proof" target="_blank" rel="noopener">github.com/MarkTheWay/delete-proof</a>
+    </div>
+  </footer>
+
+  <script>
+    const runs = {
+      vulnerable: [
+        ['l-cmd', 'npm run dp -- run \\'],
+        ['l-cmd-cont', '    --scenario delayed-update-after-delete --mode vulnerable'],
+        ['l-dim', ''],
+        ['l-dim', '   01  customer_created        synthetic customer c-7f3a'],
+        ['l-dim', '   02  event_queued            sync job queued (BullMQ)'],
+        ['l-dim', '   03  barrier_ack             worker paused before write'],
+        ['l-del', ' - 04  deletion_committed      deleted — no tombstone'],
+        ['l-dim', '   05  barrier_released        worker resumes'],
+        ['l-del', ' - 06  worker_write_committed  upsert committed'],
+        ['l-dim', ''],
+        ['l-red', ' - Final customer state: present (resurrected)'],
+        ['l-dim', '   Safety outcome : invariant_violated'],
+        ['l-verdict-bad', '   Resurrection reproduced — deletion invariant failed.'],
+      ],
+      fixed: [
+        ['l-cmd', 'npm run dp -- run \\'],
+        ['l-cmd-cont', '    --scenario delayed-update-after-delete --mode fixed'],
+        ['l-dim', ''],
+        ['l-dim', '   01  customer_created        synthetic customer c-91bd'],
+        ['l-dim', '   02  event_queued            sync job queued (BullMQ)'],
+        ['l-dim', '   03  barrier_ack             worker paused on job received'],
+        ['l-add', ' + 04  deletion_committed      advisory lock + tombstone + delete'],
+        ['l-dim', '   05  barrier_released        worker resumes, takes lock'],
+        ['l-add', ' + 06  worker_blocked_by_tombstone  write skipped'],
+        ['l-dim', ''],
+        ['l-green', ' + Final customer state: absent (null)'],
+        ['l-dim', '   Safety outcome : invariant_held'],
+        ['l-verdict-ok', '   Deletion invariant held — customer stayed absent.'],
+      ],
+    };
+
+    const term = document.getElementById('term');
+    const tabs = document.querySelectorAll('.tab');
+    let timer = null;
+    let autoplay = true;
+
+    function play(mode) {
+      clearTimeout(timer);
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+      term.innerHTML = '';
+      const lines = runs[mode];
+      let i = 0;
+      const next = () => {
+        if (i < lines.length) {
+          const [cls, text] = lines[i++];
+          const el = document.createElement('span');
+          el.className = cls;
+          el.textContent = text;
+          term.appendChild(el);
+          if (!cls.startsWith('l-add') && !cls.startsWith('l-del')) term.appendChild(document.createTextNode('\n'));
+          timer = setTimeout(next, i === 1 ? 700 : 260);
+        } else {
+          const c = document.createElement('span');
+          c.className = 'caret';
+          term.appendChild(c);
+          if (autoplay) timer = setTimeout(() => play(mode === 'vulnerable' ? 'fixed' : 'vulnerable'), 3200);
+        }
+      };
+      next();
+    }
+
+    tabs.forEach(t => t.addEventListener('click', () => { autoplay = false; play(t.dataset.mode); }));
+    play('vulnerable');
+  </script>
+</body>
+</html>
