@@ -38,3 +38,4 @@ bob_sessions/
 | # | Member | Task | Files |
 |---|---|---|---|
 | 01 | MarkTheWay | Task `ffe658448386cf1939242dd67dfb387f` — build the DeleteProof prototype from the project brief (162 commands, 44 file writes, 12 diffs; 45.88 Bobcoins) | [task history](marktheway-01-deleteproof-build-task-history.md) · [consumption summary](marktheway-01-deleteproof-build-consumption-summary.png) · in progress: [a](marktheway-01-deleteproof-build-in-progress-a.png), [b](marktheway-01-deleteproof-build-in-progress-b.png) |
+| 02 | MarkTheWay | Task `840d7a56fe5a461799780401742c5ad3` on `ibm-coding-challenge-2` — Bob drove DeleteProof through its MCP tools (vulnerable vs fixed run, traces, comparison), explained the repair from the code, and surfaced an MCP `structuredContent` bug that was then fixed and re-verified (0.586 Bobcoins) | [task history](marktheway-02-mcp-demo-task-history.md) · [consumption summary](marktheway-02-mcp-demo-consumption-summary.png) |
